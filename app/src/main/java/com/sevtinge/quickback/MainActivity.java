@@ -18,7 +18,7 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        mPrefs = getSharedPreferences(Prefs.FILE_NAME, MODE_PRIVATE);
+        mPrefs = openPrefs();
         mStatusView = findViewById(R.id.status_text);
         mHintView = findViewById(R.id.hint_text);
         mEnableSwitch = findViewById(R.id.enable_switch);
@@ -31,6 +31,14 @@ public class MainActivity extends Activity {
             mPrefs.edit().putBoolean(Prefs.KEY_ENABLED, isChecked).apply();
             renderStatus(isChecked);
         });
+    }
+
+    private SharedPreferences openPrefs() {
+        try {
+            return getSharedPreferences(Prefs.FILE_NAME, MODE_WORLD_READABLE);
+        } catch (SecurityException ignored) {
+            return getSharedPreferences(Prefs.FILE_NAME, MODE_PRIVATE);
+        }
     }
 
     private void renderStatus(boolean enabled) {

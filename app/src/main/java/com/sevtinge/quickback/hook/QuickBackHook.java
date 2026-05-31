@@ -74,6 +74,7 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
         try {
             XSharedPreferences prefs = new XSharedPreferences(BuildConfig.APPLICATION_ID, Prefs.FILE_NAME);
             prefs.reload();
+            log("isEnabled: fileCanRead=" + prefs.getFile().canRead());
             return prefs.getBoolean(Prefs.KEY_ENABLED, false);
         } catch (Throwable ignored) {
             log("isEnabled: failed to read prefs");
