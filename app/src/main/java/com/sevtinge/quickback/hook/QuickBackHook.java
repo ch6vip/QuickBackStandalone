@@ -64,10 +64,25 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
 
         mClassLoader = lpparam.classLoader;
         initReadyStateValues();
-        hookDisableQuickSwitch();
-        hookLoadRecentTaskIcon();
-        hookOnSwipeStop();
+        installHook("hookDisableQuickSwitch", this::hookDisableQuickSwitch);
+        installHook("hookLoadRecentTaskIcon", this::hookLoadRecentTaskIcon);
+        installHook("hookOnSwipeStop", this::hookOnSwipeStop);
         log("handleLoadPackage: hooks installed");
+    }
+
+    private void installHook(String name, ThrowingRunnable installer) {
+        try {
+            installer.run();
+        } catch (Throwable e) {
+            log(name + ": failed: " + e.getClass().getSimpleName() + ": " + e.getMessage());
+            if ("hookDisableQuickSwitch".equals(name)) {
+                logClassMethods(CLASS_GESTURE_STUB_VIEW, "quick|switch|task|support");
+            } else if ("hookLoadRecentTaskIcon".equals(name)) {
+                logClassMethods(CLASS_GESTURE_BACK_ARROW_VIEW, "recent|task|icon|state");
+            } else if ("hookOnSwipeStop".equals(name)) {
+                logClassMethods(CLASS_GESTURE_STUB_CALLBACK, "swipe|stop|finish|quick|task");
+            }
+        }
     }
 
     private boolean isEnabled() {
@@ -417,5 +432,23 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
 
     private void log(String message) {
         XposedBridge.log("[QuickBack] " + message);
+    }
+
+    private void logClassMethods(String className, String keywordRegex) {
+        try {
+            Class<?> clazz = findClass(className, mClassLoader);
+            String regex = "(?i).*(" + keywordRegex + ").*";
+            for (Method method : clazz.getDeclaredMethods()) {
+                if (method.getName().matches(regex)) {
+                    log("candidate method: " + className + "#" + method);
+                }
+            }
+        } catch (Throwable e) {
+            log("logClassMethods failed for " + className + ": " + e.getMessage());
+        }
+    }
+
+    private interface ThrowingRunnable {
+        void run() throws Throwable;
     }
 }
