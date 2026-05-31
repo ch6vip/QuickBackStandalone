@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">QuickBack</string>
+    <string name="module_desc">独立的“切换上一个应用” LSPosed 模块</string>
+    <string name="enable_label">启用 QuickBack</string>
+</resources>
+
