@@ -5,6 +5,7 @@ import android.app.ActivityOptions;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.os.SystemClock;
 
 import com.sevtinge.quickback.BuildConfig;
 import com.sevtinge.quickback.Prefs;
@@ -13,6 +14,7 @@ import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.WeakHashMap;
 
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
@@ -39,12 +41,15 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
     private static final String CLASS_RECENTS_MODEL = "com.miui.home.recents.RecentsModel";
     private static final String CLASS_ACTIVITY_MANAGER_WRAPPER = "com.android.systemui.shared.recents.system.ActivityManagerWrapper";
     private static final String CLASS_BACK_GESTURE_UTILS = "com.android.systemui.fsgesture.BackGestureUtils";
+    private static final long MODERN_QUICK_BACK_HOLD_MS = 350L;
+    private static final float MODERN_QUICK_BACK_MIN_OFFSET = 180.0f;
 
     private static final int STATE_BACK = 1;
     private static final int STATE_RECENT = 2;
     private static final int STATE_NONE = 3;
 
     private final Map<String, Integer> mAnimResCache = new HashMap<>();
+    private final Map<Object, Long> mSwipeStartTimes = new WeakHashMap<>();
     private ClassLoader mClassLoader;
     private int[] mReadyStateValues;
     private Method mStartTaskFromRecentsByIdMethod;
@@ -66,6 +71,7 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
         initReadyStateValues();
         installHook("hookDisableQuickSwitch", this::hookDisableQuickSwitch);
         installHook("hookLoadRecentTaskIcon", this::hookLoadRecentTaskIcon);
+        installHook("hookOnSwipeStart", this::hookOnSwipeStart);
         installHook("hookOnSwipeStop", this::hookOnSwipeStop);
         log("handleLoadPackage: hooks installed");
     }
@@ -79,6 +85,8 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
                 logClassMethods(CLASS_GESTURE_STUB_VIEW, "quick|switch|task|support");
             } else if ("hookLoadRecentTaskIcon".equals(name)) {
                 logClassMethods(CLASS_GESTURE_BACK_ARROW_VIEW, "recent|task|icon|state");
+            } else if ("hookOnSwipeStart".equals(name)) {
+                logClassMethods(CLASS_GESTURE_STUB_CALLBACK, "swipe|start|quick|task");
             } else if ("hookOnSwipeStop".equals(name)) {
                 logClassMethods(CLASS_GESTURE_STUB_CALLBACK, "swipe|stop|finish|quick|task");
             }
@@ -121,12 +129,20 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
     }
 
     private void hookDisableQuickSwitch() {
+        if (findDeclaredMethod(CLASS_GESTURE_STUB_VIEW, "isDisableQuickSwitch") == null) {
+            log("hookDisableQuickSwitch: skipped, method missing");
+            return;
+        }
         findAndHookMethod(CLASS_GESTURE_STUB_VIEW, mClassLoader, "isDisableQuickSwitch",
             XC_MethodReplacement.returnConstant(false));
         log("hookDisableQuickSwitch: installed");
     }
 
     private void hookLoadRecentTaskIcon() {
+        if (findDeclaredMethod(CLASS_GESTURE_BACK_ARROW_VIEW, "loadRecentTaskIcon") == null) {
+            log("hookLoadRecentTaskIcon: skipped, method missing");
+            return;
+        }
         findAndHookMethod(CLASS_GESTURE_BACK_ARROW_VIEW, mClassLoader, "loadRecentTaskIcon",
             new XC_MethodHook() {
                 @Override
@@ -144,6 +160,24 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
         log("hookLoadRecentTaskIcon: installed");
     }
 
+    private void hookOnSwipeStart() {
+        if (findDeclaredMethod(CLASS_GESTURE_STUB_CALLBACK, "onSwipeStart", float.class) == null) {
+            log("hookOnSwipeStart: skipped, method missing");
+            return;
+        }
+        findAndHookMethod(CLASS_GESTURE_STUB_CALLBACK, mClassLoader,
+            "onSwipeStart", float.class,
+            new XC_MethodHook() {
+                @Override
+                protected void beforeHookedMethod(MethodHookParam param) {
+                    synchronized (mSwipeStartTimes) {
+                        mSwipeStartTimes.put(param.thisObject, SystemClock.uptimeMillis());
+                    }
+                }
+            });
+        log("hookOnSwipeStart: installed");
+    }
+
     private void hookOnSwipeStop() {
         findAndHookMethod(CLASS_GESTURE_STUB_CALLBACK, mClassLoader,
             "onSwipeStop", boolean.class, float.class, boolean.class,
@@ -156,8 +190,7 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
                     }
 
                     try {
-                        int state = mapOrdinalToState(getCurrentStateOrdinal(param.thisObject));
-                        if (state == STATE_RECENT) {
+                        if (isLegacyRecentState(param.thisObject) || isModernQuickBackGesture(param)) {
                             handleRecentSwipeStop(param);
                         }
                     } catch (Throwable ignored) {
@@ -166,6 +199,36 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
                 }
             });
         log("hookOnSwipeStop: installed");
+    }
+
+    private boolean isLegacyRecentState(Object swipeCallback) throws Throwable {
+        if (mReadyStateValues == null) {
+            return false;
+        }
+        return mapOrdinalToState(getCurrentStateOrdinal(swipeCallback)) == STATE_RECENT;
+    }
+
+    private boolean isModernQuickBackGesture(XC_MethodHook.MethodHookParam param) {
+        if (mReadyStateValues != null) {
+            return false;
+        }
+
+        Long startTime;
+        synchronized (mSwipeStartTimes) {
+            startTime = mSwipeStartTimes.remove(param.thisObject);
+        }
+        if (startTime == null) {
+            return false;
+        }
+
+        long duration = SystemClock.uptimeMillis() - startTime;
+        float offset = (float) param.args[1];
+        boolean shouldHandle = duration >= MODERN_QUICK_BACK_HOLD_MS
+            && offset >= MODERN_QUICK_BACK_MIN_OFFSET;
+        if (shouldHandle) {
+            log("modern quick back gesture: duration=" + duration + ", offset=" + offset);
+        }
+        return shouldHandle;
     }
 
     private int getCurrentStateOrdinal(Object swipeCallback) throws Throwable {
@@ -214,14 +277,72 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
         }
 
         int runningTaskId = getRunningTaskId(runningTask);
-        Object loadPlan = callMethod(recentsModel, "getSmartRecentsTaskLoadPlan", context, runningTaskId);
-        Object taskStack = loadPlan != null ? callMethod(loadPlan, "getTaskStack") : null;
-        if (taskStack == null || (int) callMethod(taskStack, "getTaskCount") == 0) {
-            log("findNextTask: taskStack is empty");
+        Object task = findNextTaskFromTaskList(recentsModel, runningTask, runningTaskId);
+        if (task != null) {
+            return task;
+        }
+
+        try {
+            Object loadPlan = callMethod(recentsModel, "getSmartRecentsTaskLoadPlan", context, runningTaskId);
+            Object taskStack = loadPlan != null ? callMethod(loadPlan, "getTaskStack") : null;
+            if (taskStack == null || (int) callMethod(taskStack, "getTaskCount") == 0) {
+                log("findNextTask: taskStack is empty");
+                return null;
+            }
+            return getNextTaskFromStack(taskStack, runningTask, runningTaskId);
+        } catch (Throwable e) {
+            log("findNextTask: legacy load plan unavailable: " + e.getClass().getSimpleName());
+            return null;
+        }
+    }
+
+    private Object findNextTaskFromTaskList(Object recentsModel, ActivityManager.RunningTaskInfo runningTask,
+                                           int runningTaskId) throws Throwable {
+        ArrayList<?> tasks = getTaskList(recentsModel);
+        if (tasks == null || tasks.isEmpty()) {
+            log("findNextTaskFromTaskList: task list is empty");
             return null;
         }
 
-        return getNextTaskFromStack(taskStack, runningTask, runningTaskId);
+        int runningTaskIndex = findTaskIndex(tasks, runningTaskId);
+        if (runningTaskIndex >= 0 && runningTaskIndex + 1 < tasks.size()) {
+            return tasks.get(runningTaskIndex + 1);
+        }
+        if (runningTaskIndex >= 0) {
+            log("findNextTaskFromTaskList: running task has no next task");
+        } else {
+            log("findNextTaskFromTaskList: running task not found");
+        }
+
+        if (runningTask.baseActivity != null && TARGET_PACKAGE.equals(runningTask.baseActivity.getPackageName())) {
+            return tasks.get(0);
+        }
+
+        return null;
+    }
+
+    private ArrayList<?> getTaskList(Object recentsModel) {
+        try {
+            return new ArrayList<>((java.util.List<?>) callMethod(recentsModel, "getTaskList", false));
+        } catch (Throwable ignored) {
+            try {
+                return new ArrayList<>((java.util.List<?>) callMethod(recentsModel, "getTaskList", true));
+            } catch (Throwable ignoredAgain) {
+                return null;
+            }
+        }
+    }
+
+    private int findTaskIndex(ArrayList<?> tasks, int taskId) {
+        for (int i = 0; i < tasks.size(); i++) {
+            try {
+                if ((boolean) callMethod(tasks.get(i), "isSameTaskFromId", taskId)) {
+                    return i;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        return -1;
     }
 
     private ActivityManager.RunningTaskInfo getRunningTaskForQuickBack(Object recentsModel) throws Throwable {
@@ -396,12 +517,20 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
 
     private boolean isNextTaskSupported(Object gestureStubView) throws Throwable {
         Object contentResolver = getObjectField(gestureStubView, "mContentResolver");
-        return (boolean) callStaticMethod(findClass(CLASS_GESTURE_STUB_VIEW, mClassLoader), "supportNextTask", contentResolver);
+        try {
+            return (boolean) callStaticMethod(findClass(CLASS_GESTURE_STUB_VIEW, mClassLoader), "supportNextTask", contentResolver);
+        } catch (Throwable ignored) {
+            return true;
+        }
     }
 
     private boolean isNextTaskSupportedFromArrowView(Object arrowView) throws Throwable {
         Object contentResolver = getObjectField(arrowView, "mContentResolver");
-        return (boolean) callStaticMethod(findClass(CLASS_GESTURE_STUB_VIEW, mClassLoader), "supportNextTask", contentResolver);
+        try {
+            return (boolean) callStaticMethod(findClass(CLASS_GESTURE_STUB_VIEW, mClassLoader), "supportNextTask", contentResolver);
+        } catch (Throwable ignored) {
+            return true;
+        }
     }
 
     private void vibrateQuickBackFail(Object gestureStubView) throws Throwable {
@@ -421,12 +550,31 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
         callMethod(handler, "removeMessages", 261);
 
         Object animatorListener = getObjectField(gestureStubView, "mAnimatorListener");
-        Object backGestureUtils = getStaticObjectField(findClass(CLASS_BACK_GESTURE_UTILS, mClassLoader), "INSTANCE");
-        Object convertedOffset = callMethod(backGestureUtils, "convertOffset", offset);
         try {
-            callMethod(arrowView, "onSwipeStop", convertedOffset, animatorListener);
+            if (mReadyStateValues == null) {
+                callMethod(arrowView, "onSwipeStop", offset, animatorListener);
+            } else {
+                Object convertedOffset = convertBackOffset(offset);
+                callMethod(arrowView, "onSwipeStop", convertedOffset, animatorListener);
+            }
         } catch (Throwable ignored) {
+            Object convertedOffset = convertBackOffset(offset);
             callMethod(arrowView, "onActionUp", convertedOffset, animatorListener);
+        }
+    }
+
+    private Object convertBackOffset(float offset) throws Throwable {
+        Object backGestureUtils = getStaticObjectField(findClass(CLASS_BACK_GESTURE_UTILS, mClassLoader), "INSTANCE");
+        return callMethod(backGestureUtils, "convertOffset", offset);
+    }
+
+    private Method findDeclaredMethod(String className, String methodName, Class<?>... parameterTypes) {
+        try {
+            Method method = findClass(className, mClassLoader).getDeclaredMethod(methodName, parameterTypes);
+            method.setAccessible(true);
+            return method;
+        } catch (Throwable ignored) {
+            return null;
         }
     }
 

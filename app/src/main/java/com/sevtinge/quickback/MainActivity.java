@@ -34,11 +34,7 @@ public class MainActivity extends Activity {
     }
 
     private SharedPreferences openPrefs() {
-        try {
-            return getSharedPreferences(Prefs.FILE_NAME, MODE_WORLD_READABLE);
-        } catch (SecurityException ignored) {
-            return getSharedPreferences(Prefs.FILE_NAME, MODE_PRIVATE);
-        }
+        return getSharedPreferences(Prefs.FILE_NAME, MODE_PRIVATE);
     }
 
     private void renderStatus(boolean enabled) {
