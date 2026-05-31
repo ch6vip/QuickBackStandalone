@@ -318,7 +318,7 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
             if (options == null) {
                 options = ActivityOptions.makeBasic();
             }
-            options.setLaunchWindowingMode(4);
+            callMethod(options, "setLaunchWindowingMode", 4);
         }
 
         return options;
@@ -386,4 +386,3 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
         }
     }
 }
-

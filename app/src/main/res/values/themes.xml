@@ -1,4 +1,3 @@
 <resources>
-    <style name="Theme.QuickBack" parent="Theme.AppCompat.DayNight.NoActionBar" />
+    <style name="Theme.QuickBack" parent="@android:style/Theme.Material.Light.NoActionBar" />
 </resources>
-

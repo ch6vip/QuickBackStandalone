@@ -25,8 +25,5 @@ android {
 }
 
 dependencies {
-    implementation("androidx.appcompat:appcompat:1.7.0")
-    implementation("androidx.core:core:1.13.1")
     compileOnly("de.robv.android.xposed:api:82")
 }
-
