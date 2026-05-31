@@ -9,6 +9,7 @@ import android.widget.TextView;
 public class MainActivity extends Activity {
 
     private TextView mStatusView;
+    private TextView mHintView;
     private Switch mEnableSwitch;
     private SharedPreferences mPrefs;
 
@@ -19,6 +20,7 @@ public class MainActivity extends Activity {
 
         mPrefs = getSharedPreferences(Prefs.FILE_NAME, MODE_PRIVATE);
         mStatusView = findViewById(R.id.status_text);
+        mHintView = findViewById(R.id.hint_text);
         mEnableSwitch = findViewById(R.id.enable_switch);
 
         boolean enabled = mPrefs.getBoolean(Prefs.KEY_ENABLED, false);
@@ -32,6 +34,7 @@ public class MainActivity extends Activity {
     }
 
     private void renderStatus(boolean enabled) {
-        mStatusView.setText(enabled ? "已开启" : "已关闭");
+        mStatusView.setText(enabled ? "状态：已开启" : "状态：已关闭");
+        mHintView.setText(R.string.hint_text);
     }
 }

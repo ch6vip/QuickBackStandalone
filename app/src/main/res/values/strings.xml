@@ -2,5 +2,5 @@
     <string name="app_name">QuickBack</string>
     <string name="module_desc">独立的“切换上一个应用” LSPosed 模块</string>
     <string name="enable_label">启用 QuickBack</string>
+    <string name="hint_text">提示：需要在 LSPosed 中勾选 com.miui.home，并重启桌面后生效。</string>
 </resources>
-

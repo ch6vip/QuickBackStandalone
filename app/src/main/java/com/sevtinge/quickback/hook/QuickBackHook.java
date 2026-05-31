@@ -17,6 +17,7 @@ import java.util.Map;
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XC_MethodReplacement;
+import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XSharedPreferences;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
@@ -51,7 +52,13 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
-        if (!TARGET_PACKAGE.equals(lpparam.packageName) || !isEnabled()) {
+        if (!TARGET_PACKAGE.equals(lpparam.packageName)) {
+            return;
+        }
+
+        boolean enabled = isEnabled();
+        log("handleLoadPackage: loaded in " + lpparam.packageName + ", enabled=" + enabled);
+        if (!enabled) {
             return;
         }
 
@@ -60,6 +67,7 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
         hookDisableQuickSwitch();
         hookLoadRecentTaskIcon();
         hookOnSwipeStop();
+        log("handleLoadPackage: hooks installed");
     }
 
     private boolean isEnabled() {
@@ -68,6 +76,7 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
             prefs.reload();
             return prefs.getBoolean(Prefs.KEY_ENABLED, false);
         } catch (Throwable ignored) {
+            log("isEnabled: failed to read prefs");
             return false;
         }
     }
@@ -81,6 +90,7 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
             mReadyStateValues[getEnumOrdinal(readyStateClass, "READY_STATE_RECENT")] = STATE_RECENT;
             mReadyStateValues[getEnumOrdinal(readyStateClass, "READY_STATE_NONE")] = STATE_NONE;
         } catch (Throwable ignored) {
+            log("initReadyStateValues: failed");
         }
     }
 
@@ -92,6 +102,7 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
     private void hookDisableQuickSwitch() {
         findAndHookMethod(CLASS_GESTURE_STUB_VIEW, mClassLoader, "isDisableQuickSwitch",
             XC_MethodReplacement.returnConstant(false));
+        log("hookDisableQuickSwitch: installed");
     }
 
     private void hookLoadRecentTaskIcon() {
@@ -105,9 +116,11 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
                             param.setResult(icon);
                         }
                     } catch (Throwable ignored) {
+                        log("loadRecentTaskIcon: failed");
                     }
                 }
             });
+        log("hookLoadRecentTaskIcon: installed");
     }
 
     private void hookOnSwipeStop() {
@@ -127,9 +140,11 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
                             handleRecentSwipeStop(param);
                         }
                     } catch (Throwable ignored) {
+                        log("onSwipeStop: failed");
                     }
                 }
             });
+        log("hookOnSwipeStop: installed");
     }
 
     private int getCurrentStateOrdinal(Object swipeCallback) throws Throwable {
@@ -173,6 +188,7 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
         Object recentsModel = callStaticMethod(findClass(CLASS_RECENTS_MODEL, mClassLoader), "getInstance", context);
         ActivityManager.RunningTaskInfo runningTask = getRunningTaskForQuickBack(recentsModel);
         if (runningTask == null) {
+            log("findNextTask: runningTask is null");
             return null;
         }
 
@@ -180,6 +196,7 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
         Object loadPlan = callMethod(recentsModel, "getSmartRecentsTaskLoadPlan", context, runningTaskId);
         Object taskStack = loadPlan != null ? callMethod(loadPlan, "getTaskStack") : null;
         if (taskStack == null || (int) callMethod(taskStack, "getTaskCount") == 0) {
+            log("findNextTask: taskStack is empty");
             return null;
         }
 
@@ -206,6 +223,9 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
             if (runningTaskIndex >= 0 && runningTaskIndex + 1 < stackTasks.size()) {
                 return stackTasks.get(runningTaskIndex + 1);
             }
+            log("getNextTaskFromStack: running task has no next task");
+        } else {
+            log("getNextTaskFromStack: running task not found in stack");
         }
 
         if (runningTask.baseActivity != null && "com.miui.home".equals(runningTask.baseActivity.getPackageName())) {
@@ -227,10 +247,12 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
         if (isNextTaskSupported(gestureStubView)) {
             Object task = findNextTask(context);
             if (task != null && startTaskFromRecents(context, task, gestureStubPos)) {
+                log("handleRecentSwipeStop: task started");
                 finishSwipeStop(gestureStubView, arrowView, (float) param.args[1]);
                 param.setResult(null);
                 return;
             }
+            log("handleRecentSwipeStop: no task started");
         }
 
         vibrateQuickBackFail(gestureStubView);
@@ -366,6 +388,7 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
         if (vibrator != null) {
             callMethod(vibrator, "vibrate", 100L);
         }
+        log("vibrateQuickBackFail");
     }
 
     private void finishSwipeStop(Object gestureStubView, Object arrowView, float offset) throws Throwable {
@@ -384,5 +407,9 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
         } catch (Throwable ignored) {
             callMethod(arrowView, "onActionUp", convertedOffset, animatorListener);
         }
+    }
+
+    private void log(String message) {
+        XposedBridge.log("[QuickBack] " + message);
     }
 }
