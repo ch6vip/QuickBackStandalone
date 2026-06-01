@@ -34,7 +34,8 @@
 - 这是一个独立的 LSPosed / libxposed 模块，只对 `com.miui.home` 生效。
 - 主体逻辑在 `QuickBackHook`，负责拦截桌面手势并切换到上一个任务。
 - Android 16 的桌面方法和旧版不一致，不能再直接依赖旧的 `isDisableQuickSwitch()` 和 `loadRecentTaskIcon()`。
-- 新版适配改成监听 `GestureStubView$3.onSwipeStart()` 和 `onSwipeStop()`，通过手势持续时间和位移判断是否属于 QuickBack。
+- 新版适配改成监听 `GestureStubView$3.onSwipeStart()` 和 `onSwipeStop()`，在旧状态机不可用时通过手势持续时间和位移判断是否属于 QuickBack。
+- 现代兜底路径当前要求按住约 `700ms` 到 `1800ms`，且横向位移至少 `300f`，避免和系统普通返回手势的 `180f` 触发阈值混淆。
 - 任务切换时优先从 `RecentsModel.getTaskList()` 找当前任务和下一个任务，找不到再回退到旧的 `getSmartRecentsTaskLoadPlan()` 路径。
 
 ## 开关实现
@@ -43,17 +44,20 @@
 - Hook 端不再使用 `XSharedPreferences` 直接读文件，因为 Android 16 上会遇到不可读问题。
 - 改为通过 `ContentProvider` 读取设置状态，桌面进程可以直接调用模块内的配置入口。
 - 这样开关状态可以真正控制是否接管手势，不会再依赖 `fileCanRead` 之类的兜底逻辑。
+- Provider 只允许模块自身和 `com.miui.home` 读取开关状态，避免暴露给无关应用。
+- 开关关闭时，Hook 会放行桌面原始 `isDisableQuickSwitch()` 和 `onSwipeStop()` 逻辑，不会吞掉系统返回手势。
 
 ## 工作原理
 
 1. 用户在设置页打开开关，应用把状态写入自己的私有偏好文件。
 2. `com.miui.home` 被 LSPosed 注入后，`QuickBackHook` 会挂到桌面手势相关类上。
-3. 当用户从屏幕边缘发起并停顿到足够时间时，模块把这次滑动识别为 QuickBack。
-4. 模块先通过桌面 `Context` 读取设置状态，只有 `provider=true` 才继续接管。
+3. 模块先通过桌面 `Context` 读取设置状态，只有开关开启才继续判断 QuickBack。
+4. 当用户从屏幕边缘发起、停顿到足够时间，并继续拉到足够距离时，模块把这次滑动识别为 QuickBack。
 5. 接管时会先取消当前手势，再从最近任务列表里找“当前任务的下一个任务”。
 6. 找到目标任务后，调用桌面的任务启动接口把它切到前台，并补上对应动画。
 7. 如果没有找到可切换任务，就走失败反馈流程，避免误触后静默卡住。
-8. 这样做的核心好处是：设置开关、Android 16 适配、任务查找和任务启动各自分层，互相不绑死。
+8. 如果开关关闭，即使系统返回手势触发了返回震动，也会继续走桌面原生返回流程，不会被模块拦截。
+9. 这样做的核心好处是：设置开关、Android 16 适配、任务查找和任务启动各自分层，互相不绑死。
 
 ## libxposed 迁移
 
@@ -71,13 +75,14 @@
 - `handleLoadPackage: hooks installed`
 - `handleRecentSwipeStop: task started`
 
-如果开关关闭，不会输出每次读取开关的调试日志，也不会执行任务切换。正式版只保留 Hook 安装、Hook 失败、任务切换成功和失败反馈相关日志。
+如果开关关闭，不会输出每次读取开关的调试日志，也不会执行任务切换或拦截系统返回。正式版只保留 Hook 安装、Hook 失败、任务切换成功和失败反馈相关日志。
 
 ## 运行说明
 
 - Android 16 上旧版桌面实现里的 `isDisableQuickSwitch()` 和 `loadRecentTaskIcon()` 可能已经不存在，日志里出现 `method missing` 属于兼容分支跳过。
 - 这不会影响当前主链路，只要能看到 `handleLoadPackage: hooks installed` 和 `handleRecentSwipeStop: task started`，说明模块已经接管到新的手势路径。
 - 若 `provider=true`，说明设置页和 Hook 侧已经连通，开关状态能正常控制模块行为。
+- 当前系统桌面普通返回箭头阈值约为 `180f`，QuickBack 现代兜底使用更高的 `300f` 位移和 `700ms` 停顿来降低误触。
 
 ## 致谢
 
@@ -87,6 +92,7 @@
 
 - HyperCeiler 的 QuickBack 更偏向桌面原生流程，主要围绕 `GestureStubView` 的旧式状态机和 `getNextTask()` 进行接管。
 - 这个独立版额外加入了 Android 16 的现代兜底：当旧状态机不可用时，改用 `onSwipeStart()` 记录按住时间，再用 `onSwipeStop()` 的持续时间和偏移判断是否为 QuickBack。
+- 针对新版桌面只有 `TRIGGER_TYPE_BACK/NONE`、没有 `READY_STATE_RECENT` 的情况，独立版不会照搬旧状态机，而是使用更严格的时间和位移阈值兜底。
 - HyperCeiler 侧更像是把“下一个任务”塞回桌面的原流程，我们这里是在 `onSwipeStop()` 里直接完成任务启动、收尾和失败反馈。
 - 独立版优先从 `RecentsModel.getTaskList()` 和 `ActivityManagerWrapper` 找任务与启动入口，再回退旧的 `getSmartRecentsTaskLoadPlan()` 路径。
 - 独立版把设置页和 Hook 侧解耦成 `ContentProvider` 读取开关，避免 Android 16 上 `XSharedPreferences` 直接读文件的问题。

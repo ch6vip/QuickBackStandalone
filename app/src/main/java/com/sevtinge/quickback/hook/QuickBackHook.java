@@ -12,10 +12,10 @@ import com.sevtinge.quickback.QuickBackSettingsProvider;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.WeakHashMap;
+import java.util.concurrent.ConcurrentHashMap;
 
 import io.github.libxposed.api.XposedInterface;
 import io.github.libxposed.api.XposedModule;
@@ -31,19 +31,35 @@ public final class QuickBackHook extends XposedModule {
     private static final String CLASS_RECENTS_MODEL = "com.miui.home.recents.RecentsModel";
     private static final String CLASS_ACTIVITY_MANAGER_WRAPPER = "com.android.systemui.shared.recents.system.ActivityManagerWrapper";
     private static final String CLASS_BACK_GESTURE_UTILS = "com.android.systemui.fsgesture.BackGestureUtils";
-    private static final long MODERN_QUICK_BACK_HOLD_MS = 350L;
-    private static final float MODERN_QUICK_BACK_MIN_OFFSET = 180.0f;
+    private static final long MODERN_QUICK_BACK_HOLD_MS = 700L;
+    private static final long MODERN_QUICK_BACK_MAX_HOLD_MS = 1800L;
+    private static final float MODERN_QUICK_BACK_MIN_OFFSET = 300.0f;
+    private static final long SETTINGS_CACHE_TTL_MS = 1000L;
+    private static final long DEBUG_LOG_INTERVAL_MS = 5000L;
+    private static final long QUICK_BACK_FAIL_VIBRATE_MS = 100L;
+    private static final long GESTURE_RESET_DELAY_MS = 500L;
+    private static final int GESTURE_POS_LEFT = 0;
+    private static final int GESTURE_POS_RIGHT = 1;
+    private static final int MSG_RESET_GESTURE = 258;
+    private static final int MSG_CANCEL_ANIMATION = 261;
+    private static final int MIUI_FLOATING_WINDOW_MODE = 3;
+    private static final int MIUI_QUICK_BACK_LAUNCH_WINDOWING_MODE = 4;
 
     private static final int STATE_BACK = 1;
     private static final int STATE_RECENT = 2;
     private static final int STATE_NONE = 3;
 
-    private final Map<String, Integer> mAnimResCache = new HashMap<>();
+    private final Map<String, Integer> mAnimResCache = new ConcurrentHashMap<>();
+    private final Map<String, Method> mMethodCache = new ConcurrentHashMap<>();
+    private final Map<String, Field> mFieldCache = new ConcurrentHashMap<>();
     private final Map<Object, Long> mSwipeStartTimes = new WeakHashMap<>();
     private ClassLoader mClassLoader;
     private int[] mReadyStateValues;
     private Method mStartTaskFromRecentsByIdMethod;
     private Method mStartTaskFromRecentsByKeyMethod;
+    private long mSettingsCacheTime;
+    private boolean mSettingsCacheEnabled;
+    private long mLastDebugLogTime;
 
     @Override
     public void onPackageReady(PackageReadyParam param) {
@@ -55,7 +71,10 @@ public final class QuickBackHook extends XposedModule {
             mClassLoader = param.getClassLoader();
             initReadyStateValues();
             installHook("hookDisableQuickSwitch", findDeclaredMethod(CLASS_GESTURE_STUB_VIEW, "isDisableQuickSwitch"),
-                chain -> false);
+                chain -> {
+                    Context context = (Context) invokeMethod(chain.getThisObject(), "getContext");
+                    return isEnabled(context) ? false : chain.proceed();
+                });
             installHook("hookLoadRecentTaskIcon", findDeclaredMethod(CLASS_GESTURE_BACK_ARROW_VIEW, "loadRecentTaskIcon"),
                 chain -> {
                     Context context = (Context) invokeMethod(chain.getThisObject(), "getContext");
@@ -91,11 +110,16 @@ public final class QuickBackHook extends XposedModule {
                     }
 
                     try {
+                        Context context = getContextFromSwipeCallback(chain.getThisObject());
+                        if (!isEnabled(context)) {
+                            return chain.proceed();
+                        }
                         if (isLegacyRecentState(chain.getThisObject()) || isModernQuickBackGesture(chain)) {
                             handleRecentSwipeStop(chain);
                             return null;
                         }
-                    } catch (Throwable ignored) {
+                    } catch (Throwable e) {
+                        logDebugLimited("hookOnSwipeStop: detection failed: " + simpleError(e));
                     }
                     return chain.proceed();
                 });
@@ -142,6 +166,11 @@ public final class QuickBackHook extends XposedModule {
         return mapOrdinalToState(getCurrentStateOrdinal(swipeCallback)) == STATE_RECENT;
     }
 
+    private Context getContextFromSwipeCallback(Object swipeCallback) throws Throwable {
+        Object gestureStubView = getFieldValue(swipeCallback, "this$0");
+        return (Context) getFieldValue(gestureStubView, "mContext");
+    }
+
     private boolean isModernQuickBackGesture(XposedInterface.Chain chain) throws Throwable {
         if (mReadyStateValues != null) {
             return false;
@@ -158,6 +187,7 @@ public final class QuickBackHook extends XposedModule {
         long duration = SystemClock.uptimeMillis() - startTime;
         float offset = (float) chain.getArg(1);
         return duration >= MODERN_QUICK_BACK_HOLD_MS
+            && duration <= MODERN_QUICK_BACK_MAX_HOLD_MS
             && offset >= MODERN_QUICK_BACK_MIN_OFFSET;
     }
 
@@ -371,22 +401,22 @@ public final class QuickBackHook extends XposedModule {
 
     private ActivityOptions createActivityOptions(Context context, Object task, int gestureStubPos) throws Throwable {
         ActivityOptions options = null;
-        if (gestureStubPos == 0) {
+        if (gestureStubPos == GESTURE_POS_LEFT) {
             options = ActivityOptions.makeCustomAnimation(context,
                 getAnimResId(context, "recents_quick_switch_left_enter"),
                 getAnimResId(context, "recents_quick_switch_left_exit"));
-        } else if (gestureStubPos == 1) {
+        } else if (gestureStubPos == GESTURE_POS_RIGHT) {
             options = ActivityOptions.makeCustomAnimation(context,
                 getAnimResId(context, "recents_quick_switch_right_enter"),
                 getAnimResId(context, "recents_quick_switch_right_exit"));
         }
 
         int windowingMode = (int) getFieldValue(getFieldValue(task, "key"), "windowingMode");
-        if (windowingMode == 3) {
+        if (windowingMode == MIUI_FLOATING_WINDOW_MODE) {
             if (options == null) {
                 options = ActivityOptions.makeBasic();
             }
-            invokeMethod(options, "setLaunchWindowingMode", 4);
+            invokeMethod(options, "setLaunchWindowingMode", MIUI_QUICK_BACK_LAUNCH_WINDOWING_MODE);
         }
 
         return options;
@@ -451,7 +481,7 @@ public final class QuickBackHook extends XposedModule {
     private void vibrateQuickBackFail(Object gestureStubView) throws Throwable {
         Object vibrator = getFieldValue(gestureStubView, "mVibrator");
         if (vibrator != null) {
-            invokeMethod(vibrator, "vibrate", 100L);
+            invokeMethod(vibrator, "vibrate", QUICK_BACK_FAIL_VIBRATE_MS);
         }
         log("vibrateQuickBackFail");
     }
@@ -460,9 +490,9 @@ public final class QuickBackHook extends XposedModule {
         setFieldValue(gestureStubView, "mIsGestureStarted", false);
 
         Object handler = getFieldValue(gestureStubView, "mHandler");
-        Object resetMessage = invokeMethod(handler, "obtainMessage", 258);
-        invokeMethod(handler, "sendMessageDelayed", resetMessage, 500L);
-        invokeMethod(handler, "removeMessages", 261);
+        Object resetMessage = invokeMethod(handler, "obtainMessage", MSG_RESET_GESTURE);
+        invokeMethod(handler, "sendMessageDelayed", resetMessage, GESTURE_RESET_DELAY_MS);
+        invokeMethod(handler, "removeMessages", MSG_CANCEL_ANIMATION);
 
         Object animatorListener = getFieldValue(gestureStubView, "mAnimatorListener");
         try {
@@ -487,6 +517,12 @@ public final class QuickBackHook extends XposedModule {
         if (context == null) {
             return false;
         }
+
+        long now = SystemClock.uptimeMillis();
+        if (now - mSettingsCacheTime < SETTINGS_CACHE_TTL_MS) {
+            return mSettingsCacheEnabled;
+        }
+
         try {
             Bundle result = context.getContentResolver().call(
                 QuickBackSettingsProvider.URI,
@@ -495,10 +531,15 @@ public final class QuickBackHook extends XposedModule {
                 null
             );
             if (result != null && result.containsKey(QuickBackSettingsProvider.EXTRA_ENABLED)) {
-                return result.getBoolean(QuickBackSettingsProvider.EXTRA_ENABLED, false);
+                mSettingsCacheEnabled = result.getBoolean(QuickBackSettingsProvider.EXTRA_ENABLED, false);
+                mSettingsCacheTime = now;
+                return mSettingsCacheEnabled;
             }
-        } catch (Throwable ignored) {
+        } catch (Throwable e) {
+            logDebugLimited("isEnabled: provider read failed: " + simpleError(e));
         }
+        mSettingsCacheEnabled = false;
+        mSettingsCacheTime = now;
         return false;
     }
 
@@ -517,8 +558,7 @@ public final class QuickBackHook extends XposedModule {
     }
 
     private Object invokeStaticMethod(Class<?> clazz, String methodName, Class<?>[] parameterTypes, Object... args) throws Throwable {
-        Method method = clazz.getDeclaredMethod(methodName, parameterTypes);
-        method.setAccessible(true);
+        Method method = findDeclaredMethod(clazz, methodName, parameterTypes);
         return method.invoke(null, args);
     }
 
@@ -541,12 +581,30 @@ public final class QuickBackHook extends XposedModule {
     }
 
     private Object invokeMethod(Object target, String methodName, Class<?>[] parameterTypes, Object... args) throws Throwable {
-        Method method = target.getClass().getDeclaredMethod(methodName, parameterTypes);
-        method.setAccessible(true);
+        Method method = findDeclaredMethod(target.getClass(), methodName, parameterTypes);
         return method.invoke(target, args);
     }
 
+    private Method findDeclaredMethod(Class<?> clazz, String methodName, Class<?>... parameterTypes) throws NoSuchMethodException {
+        String cacheKey = buildDeclaredMethodKey(clazz, methodName, parameterTypes);
+        Method cached = mMethodCache.get(cacheKey);
+        if (cached != null) {
+            return cached;
+        }
+
+        Method method = clazz.getDeclaredMethod(methodName, parameterTypes);
+        method.setAccessible(true);
+        mMethodCache.put(cacheKey, method);
+        return method;
+    }
+
     private Method findCompatibleMethod(Class<?> clazz, String methodName, Object... args) {
+        String cacheKey = buildCompatibleMethodKey(clazz, methodName, args);
+        Method cached = mMethodCache.get(cacheKey);
+        if (cached != null) {
+            return cached;
+        }
+
         for (Class<?> current = clazz; current != null; current = current.getSuperclass()) {
             for (Method method : current.getDeclaredMethods()) {
                 if (!method.getName().equals(methodName) || method.getParameterCount() != args.length) {
@@ -561,6 +619,8 @@ public final class QuickBackHook extends XposedModule {
                     }
                 }
                 if (match) {
+                    method.setAccessible(true);
+                    mMethodCache.put(cacheKey, method);
                     return method;
                 }
             }
@@ -570,30 +630,58 @@ public final class QuickBackHook extends XposedModule {
 
     private Object getFieldValue(Object target, String fieldName) throws Throwable {
         Field field = findField(target.getClass(), fieldName);
-        field.setAccessible(true);
         return field.get(target);
     }
 
     private void setFieldValue(Object target, String fieldName, Object value) throws Throwable {
         Field field = findField(target.getClass(), fieldName);
-        field.setAccessible(true);
         field.set(target, value);
     }
 
     private Object getStaticFieldValue(Class<?> clazz, String fieldName) throws Throwable {
         Field field = findField(clazz, fieldName);
-        field.setAccessible(true);
         return field.get(null);
     }
 
     private Field findField(Class<?> clazz, String fieldName) throws NoSuchFieldException {
+        String cacheKey = clazz.getName() + "#" + fieldName;
+        Field cached = mFieldCache.get(cacheKey);
+        if (cached != null) {
+            return cached;
+        }
+
         for (Class<?> current = clazz; current != null; current = current.getSuperclass()) {
             try {
-                return current.getDeclaredField(fieldName);
+                Field field = current.getDeclaredField(fieldName);
+                field.setAccessible(true);
+                mFieldCache.put(cacheKey, field);
+                return field;
             } catch (NoSuchFieldException ignored) {
             }
         }
         throw new NoSuchFieldException(clazz.getName() + "#" + fieldName);
+    }
+
+    private String buildDeclaredMethodKey(Class<?> clazz, String methodName, Class<?>... parameterTypes) {
+        StringBuilder builder = new StringBuilder(clazz.getName())
+            .append('#')
+            .append(methodName)
+            .append('(');
+        for (Class<?> parameterType : parameterTypes) {
+            builder.append(parameterType.getName()).append(',');
+        }
+        return builder.append(')').toString();
+    }
+
+    private String buildCompatibleMethodKey(Class<?> clazz, String methodName, Object... args) {
+        StringBuilder builder = new StringBuilder(clazz.getName())
+            .append('#')
+            .append(methodName)
+            .append('(');
+        for (Object arg : args) {
+            builder.append(arg == null ? "null" : arg.getClass().getName()).append(',');
+        }
+        return builder.append(')').toString();
     }
 
     private Class<?> wrap(Class<?> type) {
@@ -613,6 +701,23 @@ public final class QuickBackHook extends XposedModule {
 
     private void log(String message) {
         log(Log.INFO, TAG, message);
+    }
+
+    private void logDebugLimited(String message) {
+        long now = SystemClock.uptimeMillis();
+        if (now - mLastDebugLogTime < DEBUG_LOG_INTERVAL_MS) {
+            return;
+        }
+        mLastDebugLogTime = now;
+        log(message);
+    }
+
+    private String simpleError(Throwable e) {
+        String message = e.getMessage();
+        if (message == null || message.isEmpty()) {
+            return e.getClass().getSimpleName();
+        }
+        return e.getClass().getSimpleName() + ": " + message;
     }
 
 }
