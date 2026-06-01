@@ -21,3 +21,29 @@
 2. 在 LSPosed 中勾选 `com.miui.home`
 3. 打开应用，开启开关
 
+## 实现总结
+
+- 这是一个独立的 LSPosed 模块，只对 `com.miui.home` 生效。
+- 主体逻辑在 `QuickBackHook`，负责拦截桌面手势并切换到上一个任务。
+- Android 16 的桌面方法和旧版不一致，不能再直接依赖旧的 `isDisableQuickSwitch()` 和 `loadRecentTaskIcon()`。
+- 新版适配改成监听 `GestureStubView$3.onSwipeStart()` 和 `onSwipeStop()`，通过手势持续时间和位移判断是否属于 QuickBack。
+- 任务切换时优先从 `RecentsModel.getTaskList()` 找当前任务和下一个任务，找不到再回退到旧的 `getSmartRecentsTaskLoadPlan()` 路径。
+
+## 开关实现
+
+- 设置页只负责写入本地偏好。
+- Hook 端不再使用 `XSharedPreferences` 直接读文件，因为 Android 16 上会遇到不可读问题。
+- 改为通过 `ContentProvider` 读取设置状态，桌面进程可以直接调用模块内的配置入口。
+- 这样开关状态可以真正控制是否接管手势，不会再依赖 `fileCanRead` 之类的兜底逻辑。
+
+## 验证日志
+
+正常情况下，日志里会看到这些关键信息：
+
+- `hookOnSwipeStart: installed`
+- `hookOnSwipeStop: installed`
+- `modern quick back gesture: ...`
+- `handleRecentSwipeStop: task started`
+- `isEnabled: provider=true`
+
+如果开关关闭，日志会显示 `isEnabled: provider=false`，并且不会执行任务切换。
