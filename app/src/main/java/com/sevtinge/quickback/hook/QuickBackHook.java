@@ -2,13 +2,11 @@ package com.sevtinge.quickback.hook;
 
 import android.app.ActivityManager;
 import android.app.ActivityOptions;
-import android.content.ComponentName;
 import android.content.Context;
-import android.content.Intent;
+import android.os.Bundle;
 import android.os.SystemClock;
 
-import com.sevtinge.quickback.BuildConfig;
-import com.sevtinge.quickback.Prefs;
+import com.sevtinge.quickback.QuickBackSettingsProvider;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -20,7 +18,6 @@ import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XC_MethodReplacement;
 import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.XSharedPreferences;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 import static de.robv.android.xposed.XposedHelpers.callMethod;
@@ -61,12 +58,6 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
             return;
         }
 
-        boolean enabled = isEnabled();
-        log("handleLoadPackage: loaded in " + lpparam.packageName + ", enabled=" + enabled);
-        if (!enabled) {
-            return;
-        }
-
         mClassLoader = lpparam.classLoader;
         initReadyStateValues();
         installHook("hookDisableQuickSwitch", this::hookDisableQuickSwitch);
@@ -90,23 +81,6 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
             } else if ("hookOnSwipeStop".equals(name)) {
                 logClassMethods(CLASS_GESTURE_STUB_CALLBACK, "swipe|stop|finish|quick|task");
             }
-        }
-    }
-
-    private boolean isEnabled() {
-        try {
-            XSharedPreferences prefs = new XSharedPreferences(BuildConfig.APPLICATION_ID, Prefs.FILE_NAME);
-            prefs.reload();
-            boolean canRead = prefs.getFile().canRead();
-            log("isEnabled: fileCanRead=" + canRead);
-            if (!canRead) {
-                log("isEnabled: prefs unreadable, fallback enabled for compatibility test");
-                return true;
-            }
-            return prefs.getBoolean(Prefs.KEY_ENABLED, false);
-        } catch (Throwable ignored) {
-            log("isEnabled: failed to read prefs");
-            return true;
         }
     }
 
@@ -382,6 +356,9 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
         Object gestureStubView = getObjectField(swipeCallback, "this$0");
         Object arrowView = getObjectField(gestureStubView, "mGestureBackArrowView");
         Context context = (Context) getObjectField(gestureStubView, "mContext");
+        if (!isEnabled(context)) {
+            return;
+        }
         int gestureStubPos = (int) getObjectField(gestureStubView, "mGestureStubPos");
 
         callMethod(gestureStubView, "onBackCancelled");
@@ -403,11 +380,15 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
     }
 
     private Object loadRecentTaskIcon(Object arrowView) throws Throwable {
-        if (!isNextTaskSupportedFromArrowView(arrowView)) {
-            return getObjectField(arrowView, "mNoneTaskIcon");
+        Context context = (Context) callMethod(arrowView, "getContext");
+        if (!isEnabled(context)) {
+            return null;
         }
 
-        Context context = (Context) callMethod(arrowView, "getContext");
+        if (!isNextTaskSupportedFromArrowView(arrowView)) {
+            return null;
+        }
+
         Object task = findNextTask(context);
         if (task == null) {
             return getObjectField(arrowView, "mNoneTaskIcon");
@@ -516,6 +497,10 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
     }
 
     private boolean isNextTaskSupported(Object gestureStubView) throws Throwable {
+        Context context = (Context) getObjectField(gestureStubView, "mContext");
+        if (!isEnabled(context)) {
+            return false;
+        }
         Object contentResolver = getObjectField(gestureStubView, "mContentResolver");
         try {
             return (boolean) callStaticMethod(findClass(CLASS_GESTURE_STUB_VIEW, mClassLoader), "supportNextTask", contentResolver);
@@ -525,6 +510,10 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
     }
 
     private boolean isNextTaskSupportedFromArrowView(Object arrowView) throws Throwable {
+        Context context = (Context) callMethod(arrowView, "getContext");
+        if (!isEnabled(context)) {
+            return false;
+        }
         Object contentResolver = getObjectField(arrowView, "mContentResolver");
         try {
             return (boolean) callStaticMethod(findClass(CLASS_GESTURE_STUB_VIEW, mClassLoader), "supportNextTask", contentResolver);
@@ -598,5 +587,27 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
 
     private interface ThrowingRunnable {
         void run() throws Throwable;
+    }
+
+    private boolean isEnabled(Context context) {
+        if (context == null) {
+            return false;
+        }
+        try {
+            Bundle result = context.getContentResolver().call(
+                QuickBackSettingsProvider.URI,
+                QuickBackSettingsProvider.METHOD_GET_ENABLED,
+                null,
+                null
+            );
+            if (result != null && result.containsKey(QuickBackSettingsProvider.EXTRA_ENABLED)) {
+                boolean enabled = result.getBoolean(QuickBackSettingsProvider.EXTRA_ENABLED, false);
+                log("isEnabled: provider=" + enabled);
+                return enabled;
+            }
+        } catch (Throwable e) {
+            log("isEnabled: provider read failed: " + e.getClass().getSimpleName());
+        }
+        return false;
     }
 }
