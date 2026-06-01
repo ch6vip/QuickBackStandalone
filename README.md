@@ -6,7 +6,9 @@
 
 - `app/src/main/java/com/sevtinge/quickback/MainActivity.java`：简单设置页
 - `app/src/main/java/com/sevtinge/quickback/hook/QuickBackHook.java`：桌面 Hook 入口
-- `app/src/main/assets/xposed_init`：Xposed 入口声明
+- `app/src/main/resources/META-INF/xposed/java_init.list`：现代 libxposed 入口声明
+- `app/src/main/resources/META-INF/xposed/module.prop`：现代 libxposed 模块配置
+- `app/src/main/resources/META-INF/xposed/scope.list`：模块作用域声明
 - `app/src/main/res`：界面文案与布局
 
 ## 当前目标
@@ -23,7 +25,7 @@
 
 ## 实现总结
 
-- 这是一个独立的 LSPosed 模块，只对 `com.miui.home` 生效。
+- 这是一个独立的 LSPosed / libxposed 模块，只对 `com.miui.home` 生效。
 - 主体逻辑在 `QuickBackHook`，负责拦截桌面手势并切换到上一个任务。
 - Android 16 的桌面方法和旧版不一致，不能再直接依赖旧的 `isDisableQuickSwitch()` 和 `loadRecentTaskIcon()`。
 - 新版适配改成监听 `GestureStubView$3.onSwipeStart()` 和 `onSwipeStop()`，通过手势持续时间和位移判断是否属于 QuickBack。
@@ -46,6 +48,15 @@
 6. 找到目标任务后，调用桌面的任务启动接口把它切到前台，并补上对应动画。
 7. 如果没有找到可切换任务，就走失败反馈流程，避免误触后静默卡住。
 8. 这样做的核心好处是：设置开关、Android 16 适配、任务查找和任务启动各自分层，互相不绑死。
+
+## libxposed 迁移
+
+- 迁移前已在本地创建备份分支：`backup/pre-libxposed-migration`。
+- 模块入口从 legacy `xposed_init` 切换为现代 `META-INF/xposed/java_init.list`。
+- 模块配置改为 `META-INF/xposed/module.prop` 和 `META-INF/xposed/scope.list`。
+- Hook 入口从 `IXposedHookLoadPackage` 改为继承 `XposedModule`，在 `onPackageReady()` 里注册 Hook。
+- Hook 注册从 `XposedHelpers.findAndHookMethod()` 改为 `hook(method).intercept(...)`。
+- 公开稳定依赖使用 `io.github.libxposed:api:101.0.1`。目前公开文档和仓库显示稳定 API 是 101，未直接使用不可确认的 `102.0.0` 坐标。
 
 ## 验证日志
 

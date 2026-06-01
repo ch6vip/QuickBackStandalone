@@ -1,0 +1,6 @@
+name=QuickBack
+description=独立的“切换上一个应用” LSPosed 模块
+minApiVersion=101
+targetApiVersion=102
+staticScope=com.miui.home
+exceptionMode=default

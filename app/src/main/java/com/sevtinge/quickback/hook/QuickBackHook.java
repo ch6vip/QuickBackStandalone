@@ -5,31 +5,24 @@ import android.app.ActivityOptions;
 import android.content.Context;
 import android.os.Bundle;
 import android.os.SystemClock;
+import android.util.Log;
 
 import com.sevtinge.quickback.QuickBackSettingsProvider;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.WeakHashMap;
 
-import de.robv.android.xposed.IXposedHookLoadPackage;
-import de.robv.android.xposed.XC_MethodHook;
-import de.robv.android.xposed.XC_MethodReplacement;
-import de.robv.android.xposed.XposedBridge;
-import de.robv.android.xposed.callbacks.XC_LoadPackage;
+import io.github.libxposed.api.XposedInterface;
+import io.github.libxposed.api.XposedModule;
 
-import static de.robv.android.xposed.XposedHelpers.callMethod;
-import static de.robv.android.xposed.XposedHelpers.callStaticMethod;
-import static de.robv.android.xposed.XposedHelpers.findAndHookMethod;
-import static de.robv.android.xposed.XposedHelpers.findClass;
-import static de.robv.android.xposed.XposedHelpers.getObjectField;
-import static de.robv.android.xposed.XposedHelpers.getStaticObjectField;
-import static de.robv.android.xposed.XposedHelpers.setObjectField;
+public final class QuickBackHook extends XposedModule {
 
-public final class QuickBackHook implements IXposedHookLoadPackage {
-
+    private static final String TAG = "QuickBack";
     private static final String TARGET_PACKAGE = "com.miui.home";
     private static final String CLASS_GESTURE_STUB_VIEW = "com.miui.home.recents.GestureStubView";
     private static final String CLASS_GESTURE_STUB_CALLBACK = "com.miui.home.recents.GestureStubView$3";
@@ -53,126 +46,97 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
     private Method mStartTaskFromRecentsByKeyMethod;
 
     @Override
-    public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
-        if (!TARGET_PACKAGE.equals(lpparam.packageName)) {
+    public void onPackageReady(PackageReadyParam param) {
+        if (!TARGET_PACKAGE.equals(param.getPackageName())) {
             return;
         }
 
-        mClassLoader = lpparam.classLoader;
-        initReadyStateValues();
-        installHook("hookDisableQuickSwitch", this::hookDisableQuickSwitch);
-        installHook("hookLoadRecentTaskIcon", this::hookLoadRecentTaskIcon);
-        installHook("hookOnSwipeStart", this::hookOnSwipeStart);
-        installHook("hookOnSwipeStop", this::hookOnSwipeStop);
-        log("handleLoadPackage: hooks installed");
+        try {
+            mClassLoader = param.getClassLoader();
+            initReadyStateValues();
+            installHook("hookDisableQuickSwitch", findDeclaredMethod(CLASS_GESTURE_STUB_VIEW, "isDisableQuickSwitch"),
+                chain -> false);
+            installHook("hookLoadRecentTaskIcon", findDeclaredMethod(CLASS_GESTURE_BACK_ARROW_VIEW, "loadRecentTaskIcon"),
+                chain -> {
+                    Context context = (Context) invokeMethod(chain.getThisObject(), "getContext");
+                    if (!isEnabled(context)) {
+                        return chain.proceed();
+                    }
+
+                    if (!isNextTaskSupportedFromArrowView(chain.getThisObject())) {
+                        return getFieldValue(chain.getThisObject(), "mNoneTaskIcon");
+                    }
+
+                    Object task = findNextTask(context);
+                    if (task == null) {
+                        return getFieldValue(chain.getThisObject(), "mNoneTaskIcon");
+                    }
+
+                    loadTaskIconIfNeeded(context, task);
+                    Object icon = getFieldValue(task, "icon");
+                    return icon != null ? icon : getFieldValue(chain.getThisObject(), "mNoneTaskIcon");
+                });
+            installHook("hookOnSwipeStart", findDeclaredMethod(CLASS_GESTURE_STUB_CALLBACK, "onSwipeStart", float.class),
+                chain -> {
+                    synchronized (mSwipeStartTimes) {
+                        mSwipeStartTimes.put(chain.getThisObject(), SystemClock.uptimeMillis());
+                    }
+                    return chain.proceed();
+                });
+            installHook("hookOnSwipeStop", findDeclaredMethod(CLASS_GESTURE_STUB_CALLBACK, "onSwipeStop", boolean.class, float.class, boolean.class),
+                chain -> {
+                    boolean isFinish = (boolean) chain.getArg(0);
+                    if (!isFinish) {
+                        return chain.proceed();
+                    }
+
+                    try {
+                        if (isLegacyRecentState(chain.getThisObject()) || isModernQuickBackGesture(chain)) {
+                            handleRecentSwipeStop(chain);
+                            return null;
+                        }
+                    } catch (Throwable e) {
+                        log("onSwipeStop: failed " + e.getClass().getSimpleName());
+                    }
+                    return chain.proceed();
+                });
+            log("handleLoadPackage: hooks installed");
+        } catch (Throwable e) {
+            log("handleLoadPackage: failed " + e.getClass().getSimpleName() + ": " + e.getMessage());
+        }
     }
 
-    private void installHook(String name, ThrowingRunnable installer) {
+    private void installHook(String name, Method method, XposedInterface.Hooker hooker) {
+        if (method == null) {
+            log(name + ": skipped, method missing");
+            return;
+        }
         try {
-            installer.run();
+            hook(method)
+                .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                .intercept(hooker);
+            log(name + ": installed");
         } catch (Throwable e) {
             log(name + ": failed: " + e.getClass().getSimpleName() + ": " + e.getMessage());
-            if ("hookDisableQuickSwitch".equals(name)) {
-                logClassMethods(CLASS_GESTURE_STUB_VIEW, "quick|switch|task|support");
-            } else if ("hookLoadRecentTaskIcon".equals(name)) {
-                logClassMethods(CLASS_GESTURE_BACK_ARROW_VIEW, "recent|task|icon|state");
-            } else if ("hookOnSwipeStart".equals(name)) {
-                logClassMethods(CLASS_GESTURE_STUB_CALLBACK, "swipe|start|quick|task");
-            } else if ("hookOnSwipeStop".equals(name)) {
-                logClassMethods(CLASS_GESTURE_STUB_CALLBACK, "swipe|stop|finish|quick|task");
-            }
         }
     }
 
     private void initReadyStateValues() {
         try {
-            Class<?> readyStateClass = findClass(CLASS_READY_STATE, mClassLoader);
-            Object[] enumValues = (Object[]) callStaticMethod(readyStateClass, "values");
+            Class<?> readyStateClass = findClass(CLASS_READY_STATE);
+            Object[] enumValues = readyStateClass.getEnumConstants();
             mReadyStateValues = new int[enumValues.length];
             mReadyStateValues[getEnumOrdinal(readyStateClass, "READY_STATE_BACK")] = STATE_BACK;
             mReadyStateValues[getEnumOrdinal(readyStateClass, "READY_STATE_RECENT")] = STATE_RECENT;
             mReadyStateValues[getEnumOrdinal(readyStateClass, "READY_STATE_NONE")] = STATE_NONE;
-        } catch (Throwable ignored) {
-            log("initReadyStateValues: failed");
+        } catch (Throwable e) {
+            log("initReadyStateValues: failed " + e.getClass().getSimpleName());
         }
     }
 
-    private int getEnumOrdinal(Class<?> enumClass, String name) {
-        Enum<?> value = (Enum<?>) getStaticObjectField(enumClass, name);
+    private int getEnumOrdinal(Class<?> enumClass, String name) throws Throwable {
+        Enum<?> value = (Enum<?>) getStaticFieldValue(enumClass, name);
         return value.ordinal();
-    }
-
-    private void hookDisableQuickSwitch() {
-        if (findDeclaredMethod(CLASS_GESTURE_STUB_VIEW, "isDisableQuickSwitch") == null) {
-            log("hookDisableQuickSwitch: skipped, method missing");
-            return;
-        }
-        findAndHookMethod(CLASS_GESTURE_STUB_VIEW, mClassLoader, "isDisableQuickSwitch",
-            XC_MethodReplacement.returnConstant(false));
-        log("hookDisableQuickSwitch: installed");
-    }
-
-    private void hookLoadRecentTaskIcon() {
-        if (findDeclaredMethod(CLASS_GESTURE_BACK_ARROW_VIEW, "loadRecentTaskIcon") == null) {
-            log("hookLoadRecentTaskIcon: skipped, method missing");
-            return;
-        }
-        findAndHookMethod(CLASS_GESTURE_BACK_ARROW_VIEW, mClassLoader, "loadRecentTaskIcon",
-            new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
-                    try {
-                        Object icon = loadRecentTaskIcon(param.thisObject);
-                        if (icon != null) {
-                            param.setResult(icon);
-                        }
-                    } catch (Throwable ignored) {
-                        log("loadRecentTaskIcon: failed");
-                    }
-                }
-            });
-        log("hookLoadRecentTaskIcon: installed");
-    }
-
-    private void hookOnSwipeStart() {
-        if (findDeclaredMethod(CLASS_GESTURE_STUB_CALLBACK, "onSwipeStart", float.class) == null) {
-            log("hookOnSwipeStart: skipped, method missing");
-            return;
-        }
-        findAndHookMethod(CLASS_GESTURE_STUB_CALLBACK, mClassLoader,
-            "onSwipeStart", float.class,
-            new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
-                    synchronized (mSwipeStartTimes) {
-                        mSwipeStartTimes.put(param.thisObject, SystemClock.uptimeMillis());
-                    }
-                }
-            });
-        log("hookOnSwipeStart: installed");
-    }
-
-    private void hookOnSwipeStop() {
-        findAndHookMethod(CLASS_GESTURE_STUB_CALLBACK, mClassLoader,
-            "onSwipeStop", boolean.class, float.class, boolean.class,
-            new XC_MethodHook() {
-                @Override
-                protected void beforeHookedMethod(MethodHookParam param) {
-                    boolean isFinish = (boolean) param.args[0];
-                    if (!isFinish) {
-                        return;
-                    }
-
-                    try {
-                        if (isLegacyRecentState(param.thisObject) || isModernQuickBackGesture(param)) {
-                            handleRecentSwipeStop(param);
-                        }
-                    } catch (Throwable ignored) {
-                        log("onSwipeStop: failed");
-                    }
-                }
-            });
-        log("hookOnSwipeStop: installed");
     }
 
     private boolean isLegacyRecentState(Object swipeCallback) throws Throwable {
@@ -182,21 +146,21 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
         return mapOrdinalToState(getCurrentStateOrdinal(swipeCallback)) == STATE_RECENT;
     }
 
-    private boolean isModernQuickBackGesture(XC_MethodHook.MethodHookParam param) {
+    private boolean isModernQuickBackGesture(XposedInterface.Chain chain) throws Throwable {
         if (mReadyStateValues != null) {
             return false;
         }
 
         Long startTime;
         synchronized (mSwipeStartTimes) {
-            startTime = mSwipeStartTimes.remove(param.thisObject);
+            startTime = mSwipeStartTimes.remove(chain.getThisObject());
         }
         if (startTime == null) {
             return false;
         }
 
         long duration = SystemClock.uptimeMillis() - startTime;
-        float offset = (float) param.args[1];
+        float offset = (float) chain.getArg(1);
         boolean shouldHandle = duration >= MODERN_QUICK_BACK_HOLD_MS
             && offset >= MODERN_QUICK_BACK_MIN_OFFSET;
         if (shouldHandle) {
@@ -206,10 +170,10 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
     }
 
     private int getCurrentStateOrdinal(Object swipeCallback) throws Throwable {
-        Object gestureStubView = getObjectField(swipeCallback, "this$0");
-        Object arrowView = getObjectField(gestureStubView, "mGestureBackArrowView");
-        Object currentState = callMethod(arrowView, "getCurrentState");
-        return (int) callMethod(currentState, "ordinal");
+        Object gestureStubView = getFieldValue(swipeCallback, "this$0");
+        Object arrowView = getFieldValue(gestureStubView, "mGestureBackArrowView");
+        Object currentState = invokeMethod(arrowView, "getCurrentState");
+        return (int) invokeMethod(currentState, "ordinal");
     }
 
     private int mapOrdinalToState(int ordinal) {
@@ -219,7 +183,7 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
         try {
             Class<?> switchMapClass = findSwitchMapClass();
             if (switchMapClass != null) {
-                int[] switchMap = (int[]) getStaticObjectField(switchMapClass,
+                int[] switchMap = (int[]) getStaticFieldValue(switchMapClass,
                     "$SwitchMap$com$miui$home$recents$GestureBackArrowView$ReadyState");
                 if (ordinal >= 0 && ordinal < switchMap.length) {
                     return switchMap[ordinal];
@@ -232,10 +196,10 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
 
     private Class<?> findSwitchMapClass() {
         try {
-            return findClass("com.miui.home.recents.GestureStubView$4", mClassLoader);
+            return findClass("com.miui.home.recents.GestureStubView$4");
         } catch (Throwable ignored) {
             try {
-                return findClass("com.miui.home.recents.GestureStubView$5", mClassLoader);
+                return findClass("com.miui.home.recents.GestureStubView$5");
             } catch (Throwable ignoredAgain) {
                 return null;
             }
@@ -243,7 +207,7 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
     }
 
     private Object findNextTask(Context context) throws Throwable {
-        Object recentsModel = callStaticMethod(findClass(CLASS_RECENTS_MODEL, mClassLoader), "getInstance", context);
+        Object recentsModel = invokeStaticMethod(findClass(CLASS_RECENTS_MODEL), "getInstance", context);
         ActivityManager.RunningTaskInfo runningTask = getRunningTaskForQuickBack(recentsModel);
         if (runningTask == null) {
             log("findNextTask: runningTask is null");
@@ -257,9 +221,9 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
         }
 
         try {
-            Object loadPlan = callMethod(recentsModel, "getSmartRecentsTaskLoadPlan", context, runningTaskId);
-            Object taskStack = loadPlan != null ? callMethod(loadPlan, "getTaskStack") : null;
-            if (taskStack == null || (int) callMethod(taskStack, "getTaskCount") == 0) {
+            Object loadPlan = invokeMethod(recentsModel, "getSmartRecentsTaskLoadPlan", context, runningTaskId);
+            Object taskStack = loadPlan != null ? invokeMethod(loadPlan, "getTaskStack") : null;
+            if (taskStack == null || (int) invokeMethod(taskStack, "getTaskCount") == 0) {
                 log("findNextTask: taskStack is empty");
                 return null;
             }
@@ -271,7 +235,7 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
     }
 
     private Object findNextTaskFromTaskList(Object recentsModel, ActivityManager.RunningTaskInfo runningTask,
-                                           int runningTaskId) throws Throwable {
+                                            int runningTaskId) throws Throwable {
         ArrayList<?> tasks = getTaskList(recentsModel);
         if (tasks == null || tasks.isEmpty()) {
             log("findNextTaskFromTaskList: task list is empty");
@@ -295,12 +259,12 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
         return null;
     }
 
-    private ArrayList<?> getTaskList(Object recentsModel) {
+    private ArrayList<?> getTaskList(Object recentsModel) throws Throwable {
         try {
-            return new ArrayList<>((java.util.List<?>) callMethod(recentsModel, "getTaskList", false));
+            return new ArrayList<>((List<?>) invokeMethod(recentsModel, "getTaskList", false));
         } catch (Throwable ignored) {
             try {
-                return new ArrayList<>((java.util.List<?>) callMethod(recentsModel, "getTaskList", true));
+                return new ArrayList<>((List<?>) invokeMethod(recentsModel, "getTaskList", true));
             } catch (Throwable ignoredAgain) {
                 return null;
             }
@@ -310,7 +274,7 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
     private int findTaskIndex(ArrayList<?> tasks, int taskId) {
         for (int i = 0; i < tasks.size(); i++) {
             try {
-                if ((boolean) callMethod(tasks.get(i), "isSameTaskFromId", taskId)) {
+                if ((boolean) invokeMethod(tasks.get(i), "isSameTaskFromId", taskId)) {
                     return i;
                 }
             } catch (Throwable ignored) {
@@ -321,21 +285,21 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
 
     private ActivityManager.RunningTaskInfo getRunningTaskForQuickBack(Object recentsModel) throws Throwable {
         try {
-            return (ActivityManager.RunningTaskInfo) callMethod(recentsModel, "getRunningTaskForGesture", true);
+            return (ActivityManager.RunningTaskInfo) invokeMethod(recentsModel, "getRunningTaskForGesture", true);
         } catch (Throwable ignored) {
-            return (ActivityManager.RunningTaskInfo) callMethod(recentsModel, "getRunningTask");
+            return (ActivityManager.RunningTaskInfo) invokeMethod(recentsModel, "getRunningTask");
         }
     }
 
     private Object getNextTaskFromStack(Object taskStack, ActivityManager.RunningTaskInfo runningTask, int runningTaskId) throws Throwable {
-        ArrayList<?> stackTasks = (ArrayList<?>) callMethod(taskStack, "getStackTasks");
+        ArrayList<?> stackTasks = (ArrayList<?>) invokeMethod(taskStack, "getStackTasks");
         if (stackTasks == null || stackTasks.isEmpty()) {
             return null;
         }
 
-        Object runningTaskInStack = callMethod(taskStack, "findTaskWithId", runningTaskId);
+        Object runningTaskInStack = invokeMethod(taskStack, "findTaskWithId", runningTaskId);
         if (runningTaskInStack != null) {
-            int runningTaskIndex = (int) callMethod(taskStack, "indexOfStackTask", runningTaskInStack);
+            int runningTaskIndex = (int) invokeMethod(taskStack, "indexOfStackTask", runningTaskInStack);
             if (runningTaskIndex >= 0 && runningTaskIndex + 1 < stackTasks.size()) {
                 return stackTasks.get(runningTaskIndex + 1);
             }
@@ -344,81 +308,61 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
             log("getNextTaskFromStack: running task not found in stack");
         }
 
-        if (runningTask.baseActivity != null && "com.miui.home".equals(runningTask.baseActivity.getPackageName())) {
+        if (runningTask.baseActivity != null && TARGET_PACKAGE.equals(runningTask.baseActivity.getPackageName())) {
             return stackTasks.get(0);
         }
 
         return null;
     }
 
-    private void handleRecentSwipeStop(XC_MethodHook.MethodHookParam param) throws Throwable {
-        Object swipeCallback = param.thisObject;
-        Object gestureStubView = getObjectField(swipeCallback, "this$0");
-        Object arrowView = getObjectField(gestureStubView, "mGestureBackArrowView");
-        Context context = (Context) getObjectField(gestureStubView, "mContext");
+    private void handleRecentSwipeStop(XposedInterface.Chain chain) throws Throwable {
+        Object swipeCallback = chain.getThisObject();
+        Object gestureStubView = getFieldValue(swipeCallback, "this$0");
+        Object arrowView = getFieldValue(gestureStubView, "mGestureBackArrowView");
+        Context context = (Context) getFieldValue(gestureStubView, "mContext");
         if (!isEnabled(context)) {
             return;
         }
-        int gestureStubPos = (int) getObjectField(gestureStubView, "mGestureStubPos");
+        int gestureStubPos = (int) getFieldValue(gestureStubView, "mGestureStubPos");
 
-        callMethod(gestureStubView, "onBackCancelled");
+        invokeMethod(gestureStubView, "onBackCancelled");
 
         if (isNextTaskSupported(gestureStubView)) {
             Object task = findNextTask(context);
             if (task != null && startTaskFromRecents(context, task, gestureStubPos)) {
                 log("handleRecentSwipeStop: task started");
-                finishSwipeStop(gestureStubView, arrowView, (float) param.args[1]);
-                param.setResult(null);
+                finishSwipeStop(gestureStubView, arrowView, (float) chain.getArg(1));
                 return;
             }
             log("handleRecentSwipeStop: no task started");
         }
 
         vibrateQuickBackFail(gestureStubView);
-        finishSwipeStop(gestureStubView, arrowView, (float) param.args[1]);
-        param.setResult(null);
-    }
-
-    private Object loadRecentTaskIcon(Object arrowView) throws Throwable {
-        Context context = (Context) callMethod(arrowView, "getContext");
-        if (!isEnabled(context)) {
-            return null;
-        }
-
-        if (!isNextTaskSupportedFromArrowView(arrowView)) {
-            return null;
-        }
-
-        Object task = findNextTask(context);
-        if (task == null) {
-            return getObjectField(arrowView, "mNoneTaskIcon");
-        }
-
-        loadTaskIconIfNeeded(context, task);
-        Object icon = getObjectField(task, "icon");
-        return icon != null ? icon : getObjectField(arrowView, "mNoneTaskIcon");
+        finishSwipeStop(gestureStubView, arrowView, (float) chain.getArg(1));
     }
 
     private void loadTaskIconIfNeeded(Context context, Object task) throws Throwable {
-        if (getObjectField(task, "icon") != null) {
+        if (getFieldValue(task, "icon") != null) {
             return;
         }
 
-        Object recentsModel = callStaticMethod(findClass(CLASS_RECENTS_MODEL, mClassLoader), "getInstance", context);
-        Object taskLoader = callMethod(recentsModel, "getTaskLoader");
-        Object icon = callMethod(taskLoader, "getAndUpdateActivityIcon",
-            getObjectField(task, "key"),
-            getObjectField(task, "taskDescription"),
+        Object recentsModel = invokeStaticMethod(findClass(CLASS_RECENTS_MODEL), "getInstance", context);
+        Object taskLoader = invokeMethod(recentsModel, "getTaskLoader");
+        Object taskKey = getFieldValue(task, "key");
+        Object taskDescription = getFieldValue(task, "taskDescription");
+        Object icon = invokeMethod(taskLoader, "getAndUpdateActivityIcon",
+            taskKey,
+            taskDescription,
             context.getResources(),
             true);
-        setObjectField(task, "icon", icon);
+        setFieldValue(task, "icon", icon);
     }
 
     private boolean startTaskFromRecents(Context context, Object task, int gestureStubPos) throws Throwable {
         ActivityOptions options = createActivityOptions(context, task, gestureStubPos);
-        Object taskKey = getObjectField(task, "key");
-        int taskId = (int) getObjectField(taskKey, "id");
-        Object wrapper = callStaticMethod(findClass(CLASS_ACTIVITY_MANAGER_WRAPPER, mClassLoader), "getInstance");
+        Object taskKey = getFieldValue(task, "key");
+        int taskId = (int) getFieldValue(taskKey, "id");
+        Object wrapper = invokeStaticMethod(findClass(CLASS_ACTIVITY_MANAGER_WRAPPER), "getInstance");
         if (wrapper == null) {
             return false;
         }
@@ -458,12 +402,12 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
                 getAnimResId(context, "recents_quick_switch_right_exit"));
         }
 
-        int windowingMode = (int) getObjectField(getObjectField(task, "key"), "windowingMode");
+        int windowingMode = (int) getFieldValue(getFieldValue(task, "key"), "windowingMode");
         if (windowingMode == 3) {
             if (options == null) {
                 options = ActivityOptions.makeBasic();
             }
-            callMethod(options, "setLaunchWindowingMode", 4);
+            invokeMethod(options, "setLaunchWindowingMode", 4);
         }
 
         return options;
@@ -480,113 +424,84 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
         return resId;
     }
 
-    private int getRunningTaskId(ActivityManager.RunningTaskInfo runningTask) {
+    private int getRunningTaskId(ActivityManager.RunningTaskInfo runningTask) throws Throwable {
         try {
-            Object wrapper = callStaticMethod(findClass(CLASS_ACTIVITY_MANAGER_WRAPPER, mClassLoader), "getInstance");
+            Object wrapper = invokeStaticMethod(findClass(CLASS_ACTIVITY_MANAGER_WRAPPER), "getInstance");
             if (wrapper != null) {
-                return (int) callMethod(wrapper, "getTaskId", runningTask);
+                Object result = invokeMethod(wrapper, "getTaskId", runningTask);
+                if (result instanceof Integer) {
+                    return (Integer) result;
+                }
             }
         } catch (Throwable ignored) {
         }
 
         try {
-            return (int) getObjectField(runningTask, "taskId");
+            return (int) getFieldValue(runningTask, "taskId");
         } catch (Throwable ignored) {
             return runningTask.id;
         }
     }
 
     private boolean isNextTaskSupported(Object gestureStubView) throws Throwable {
-        Context context = (Context) getObjectField(gestureStubView, "mContext");
+        Context context = (Context) getFieldValue(gestureStubView, "mContext");
         if (!isEnabled(context)) {
             return false;
         }
-        Object contentResolver = getObjectField(gestureStubView, "mContentResolver");
+        Object contentResolver = getFieldValue(gestureStubView, "mContentResolver");
         try {
-            return (boolean) callStaticMethod(findClass(CLASS_GESTURE_STUB_VIEW, mClassLoader), "supportNextTask", contentResolver);
+            return (boolean) invokeStaticMethod(findClass(CLASS_GESTURE_STUB_VIEW), "supportNextTask", contentResolver);
         } catch (Throwable ignored) {
             return true;
         }
     }
 
     private boolean isNextTaskSupportedFromArrowView(Object arrowView) throws Throwable {
-        Context context = (Context) callMethod(arrowView, "getContext");
+        Context context = (Context) invokeMethod(arrowView, "getContext");
         if (!isEnabled(context)) {
             return false;
         }
-        Object contentResolver = getObjectField(arrowView, "mContentResolver");
+        Object contentResolver = getFieldValue(arrowView, "mContentResolver");
         try {
-            return (boolean) callStaticMethod(findClass(CLASS_GESTURE_STUB_VIEW, mClassLoader), "supportNextTask", contentResolver);
+            return (boolean) invokeStaticMethod(findClass(CLASS_GESTURE_STUB_VIEW), "supportNextTask", contentResolver);
         } catch (Throwable ignored) {
             return true;
         }
     }
 
     private void vibrateQuickBackFail(Object gestureStubView) throws Throwable {
-        Object vibrator = getObjectField(gestureStubView, "mVibrator");
+        Object vibrator = getFieldValue(gestureStubView, "mVibrator");
         if (vibrator != null) {
-            callMethod(vibrator, "vibrate", 100L);
+            invokeMethod(vibrator, "vibrate", 100L);
         }
         log("vibrateQuickBackFail");
     }
 
     private void finishSwipeStop(Object gestureStubView, Object arrowView, float offset) throws Throwable {
-        setObjectField(gestureStubView, "mIsGestureStarted", false);
+        setFieldValue(gestureStubView, "mIsGestureStarted", false);
 
-        Object handler = getObjectField(gestureStubView, "mHandler");
-        Object resetMessage = callMethod(handler, "obtainMessage", 258);
-        callMethod(handler, "sendMessageDelayed", resetMessage, 500L);
-        callMethod(handler, "removeMessages", 261);
+        Object handler = getFieldValue(gestureStubView, "mHandler");
+        Object resetMessage = invokeMethod(handler, "obtainMessage", 258);
+        invokeMethod(handler, "sendMessageDelayed", resetMessage, 500L);
+        invokeMethod(handler, "removeMessages", 261);
 
-        Object animatorListener = getObjectField(gestureStubView, "mAnimatorListener");
+        Object animatorListener = getFieldValue(gestureStubView, "mAnimatorListener");
         try {
             if (mReadyStateValues == null) {
-                callMethod(arrowView, "onSwipeStop", offset, animatorListener);
+                invokeMethod(arrowView, "onSwipeStop", offset, animatorListener);
             } else {
                 Object convertedOffset = convertBackOffset(offset);
-                callMethod(arrowView, "onSwipeStop", convertedOffset, animatorListener);
+                invokeMethod(arrowView, "onSwipeStop", convertedOffset, animatorListener);
             }
         } catch (Throwable ignored) {
             Object convertedOffset = convertBackOffset(offset);
-            callMethod(arrowView, "onActionUp", convertedOffset, animatorListener);
+            invokeMethod(arrowView, "onActionUp", convertedOffset, animatorListener);
         }
     }
 
     private Object convertBackOffset(float offset) throws Throwable {
-        Object backGestureUtils = getStaticObjectField(findClass(CLASS_BACK_GESTURE_UTILS, mClassLoader), "INSTANCE");
-        return callMethod(backGestureUtils, "convertOffset", offset);
-    }
-
-    private Method findDeclaredMethod(String className, String methodName, Class<?>... parameterTypes) {
-        try {
-            Method method = findClass(className, mClassLoader).getDeclaredMethod(methodName, parameterTypes);
-            method.setAccessible(true);
-            return method;
-        } catch (Throwable ignored) {
-            return null;
-        }
-    }
-
-    private void log(String message) {
-        XposedBridge.log("[QuickBack] " + message);
-    }
-
-    private void logClassMethods(String className, String keywordRegex) {
-        try {
-            Class<?> clazz = findClass(className, mClassLoader);
-            String regex = "(?i).*(" + keywordRegex + ").*";
-            for (Method method : clazz.getDeclaredMethods()) {
-                if (method.getName().matches(regex)) {
-                    log("candidate method: " + className + "#" + method);
-                }
-            }
-        } catch (Throwable e) {
-            log("logClassMethods failed for " + className + ": " + e.getMessage());
-        }
-    }
-
-    private interface ThrowingRunnable {
-        void run() throws Throwable;
+        Object backGestureUtils = getStaticFieldValue(findClass(CLASS_BACK_GESTURE_UTILS), "INSTANCE");
+        return invokeMethod(backGestureUtils, "convertOffset", offset);
     }
 
     private boolean isEnabled(Context context) {
@@ -610,4 +525,118 @@ public final class QuickBackHook implements IXposedHookLoadPackage {
         }
         return false;
     }
+
+    private Class<?> findClass(String name) throws ClassNotFoundException {
+        return Class.forName(name, false, mClassLoader);
+    }
+
+    private Method findDeclaredMethod(String className, String methodName, Class<?>... parameterTypes) {
+        try {
+            Method method = findClass(className).getDeclaredMethod(methodName, parameterTypes);
+            method.setAccessible(true);
+            return method;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private Object invokeStaticMethod(Class<?> clazz, String methodName, Class<?>[] parameterTypes, Object... args) throws Throwable {
+        Method method = clazz.getDeclaredMethod(methodName, parameterTypes);
+        method.setAccessible(true);
+        return method.invoke(null, args);
+    }
+
+    private Object invokeStaticMethod(Class<?> clazz, String methodName, Object... args) throws Throwable {
+        Method method = findCompatibleMethod(clazz, methodName, args);
+        if (method == null) {
+            throw new NoSuchMethodException(clazz.getName() + "#" + methodName);
+        }
+        method.setAccessible(true);
+        return method.invoke(null, args);
+    }
+
+    private Object invokeMethod(Object target, String methodName, Object... args) throws Throwable {
+        Method method = findCompatibleMethod(target.getClass(), methodName, args);
+        if (method == null) {
+            throw new NoSuchMethodException(target.getClass().getName() + "#" + methodName);
+        }
+        method.setAccessible(true);
+        return method.invoke(target, args);
+    }
+
+    private Object invokeMethod(Object target, String methodName, Class<?>[] parameterTypes, Object... args) throws Throwable {
+        Method method = target.getClass().getDeclaredMethod(methodName, parameterTypes);
+        method.setAccessible(true);
+        return method.invoke(target, args);
+    }
+
+    private Method findCompatibleMethod(Class<?> clazz, String methodName, Object... args) {
+        for (Class<?> current = clazz; current != null; current = current.getSuperclass()) {
+            for (Method method : current.getDeclaredMethods()) {
+                if (!method.getName().equals(methodName) || method.getParameterCount() != args.length) {
+                    continue;
+                }
+                Class<?>[] types = method.getParameterTypes();
+                boolean match = true;
+                for (int i = 0; i < types.length; i++) {
+                    if (args[i] != null && !wrap(types[i]).isAssignableFrom(args[i].getClass())) {
+                        match = false;
+                        break;
+                    }
+                }
+                if (match) {
+                    return method;
+                }
+            }
+        }
+        return null;
+    }
+
+    private Object getFieldValue(Object target, String fieldName) throws Throwable {
+        Field field = findField(target.getClass(), fieldName);
+        field.setAccessible(true);
+        return field.get(target);
+    }
+
+    private void setFieldValue(Object target, String fieldName, Object value) throws Throwable {
+        Field field = findField(target.getClass(), fieldName);
+        field.setAccessible(true);
+        field.set(target, value);
+    }
+
+    private Object getStaticFieldValue(Class<?> clazz, String fieldName) throws Throwable {
+        Field field = findField(clazz, fieldName);
+        field.setAccessible(true);
+        return field.get(null);
+    }
+
+    private Field findField(Class<?> clazz, String fieldName) throws NoSuchFieldException {
+        for (Class<?> current = clazz; current != null; current = current.getSuperclass()) {
+            try {
+                return current.getDeclaredField(fieldName);
+            } catch (NoSuchFieldException ignored) {
+            }
+        }
+        throw new NoSuchFieldException(clazz.getName() + "#" + fieldName);
+    }
+
+    private Class<?> wrap(Class<?> type) {
+        if (!type.isPrimitive()) {
+            return type;
+        }
+        if (type == int.class) return Integer.class;
+        if (type == boolean.class) return Boolean.class;
+        if (type == long.class) return Long.class;
+        if (type == float.class) return Float.class;
+        if (type == double.class) return Double.class;
+        if (type == short.class) return Short.class;
+        if (type == byte.class) return Byte.class;
+        if (type == char.class) return Character.class;
+        return type;
+    }
+
+    private void log(String message) {
+        log(Log.INFO, TAG, message);
+    }
+
 }

@@ -18,6 +18,12 @@ android {
         buildConfig = true
     }
 
+    sourceSets {
+        named("main") {
+            resources.srcDir("src/main/resources")
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -25,5 +31,5 @@ android {
 }
 
 dependencies {
-    compileOnly("de.robv.android.xposed:api:82")
+    compileOnly("io.github.libxposed:api:101.0.1")
 }
