@@ -19,8 +19,8 @@
 
 ## 发布状态
 
-- 当前版本：`1.1`
-- 变更摘要：现代 libxposed 迁移、Android 16 适配、调试日志收敛
+- 当前版本：`1.1.1`
+- 变更摘要：现代 libxposed 迁移、Android 16 适配、调试日志进一步收敛
 - 详细记录见 [`CHANGELOG.md`](./CHANGELOG.md)
 
 ## 使用方式
@@ -72,3 +72,9 @@
 - `handleRecentSwipeStop: task started`
 
 如果开关关闭，不会输出每次读取开关的调试日志，也不会执行任务切换。正式版只保留 Hook 安装、Hook 失败、任务切换成功和失败反馈相关日志。
+
+## 运行说明
+
+- Android 16 上旧版桌面实现里的 `isDisableQuickSwitch()` 和 `loadRecentTaskIcon()` 可能已经不存在，日志里出现 `method missing` 属于兼容分支跳过。
+- 这不会影响当前主链路，只要能看到 `handleLoadPackage: hooks installed` 和 `handleRecentSwipeStop: task started`，说明模块已经接管到新的手势路径。
+- 若 `provider=true`，说明设置页和 Hook 侧已经连通，开关状态能正常控制模块行为。

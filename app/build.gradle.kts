@@ -10,8 +10,8 @@ android {
         applicationId = "com.sevtinge.quickback"
         minSdk = 27
         targetSdk = 36
-        versionCode = 2
-        versionName = "1.1"
+        versionCode = 3
+        versionName = "1.1.1"
     }
 
     buildFeatures {

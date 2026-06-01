@@ -157,12 +157,8 @@ public final class QuickBackHook extends XposedModule {
 
         long duration = SystemClock.uptimeMillis() - startTime;
         float offset = (float) chain.getArg(1);
-        boolean shouldHandle = duration >= MODERN_QUICK_BACK_HOLD_MS
+        return duration >= MODERN_QUICK_BACK_HOLD_MS
             && offset >= MODERN_QUICK_BACK_MIN_OFFSET;
-        if (shouldHandle) {
-            log("modern quick back gesture: duration=" + duration + ", offset=" + offset);
-        }
-        return shouldHandle;
     }
 
     private int getCurrentStateOrdinal(Object swipeCallback) throws Throwable {
