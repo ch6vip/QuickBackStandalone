@@ -78,3 +78,16 @@
 - Android 16 上旧版桌面实现里的 `isDisableQuickSwitch()` 和 `loadRecentTaskIcon()` 可能已经不存在，日志里出现 `method missing` 属于兼容分支跳过。
 - 这不会影响当前主链路，只要能看到 `handleLoadPackage: hooks installed` 和 `handleRecentSwipeStop: task started`，说明模块已经接管到新的手势路径。
 - 若 `provider=true`，说明设置页和 Hook 侧已经连通，开关状态能正常控制模块行为。
+
+## 致谢
+
+- 感谢 [HyperCeiler](https://github.com/ReChronoRain/HyperCeiler) 项目在 HyperOS / MIUI 系统功能适配和 LSPosed Hook 实现上的参考价值。
+
+## 与 HyperCeiler 的细节差异
+
+- HyperCeiler 的 QuickBack 更偏向桌面原生流程，主要围绕 `GestureStubView` 的旧式状态机和 `getNextTask()` 进行接管。
+- 这个独立版额外加入了 Android 16 的现代兜底：当旧状态机不可用时，改用 `onSwipeStart()` 记录按住时间，再用 `onSwipeStop()` 的持续时间和偏移判断是否为 QuickBack。
+- HyperCeiler 侧更像是把“下一个任务”塞回桌面的原流程，我们这里是在 `onSwipeStop()` 里直接完成任务启动、收尾和失败反馈。
+- 独立版优先从 `RecentsModel.getTaskList()` 和 `ActivityManagerWrapper` 找任务与启动入口，再回退旧的 `getSmartRecentsTaskLoadPlan()` 路径。
+- 独立版把设置页和 Hook 侧解耦成 `ContentProvider` 读取开关，避免 Android 16 上 `XSharedPreferences` 直接读文件的问题。
+- 所以两者都能做 QuickBack，但独立版更偏“针对当前桌面版本的单功能适配”，HyperCeiler 更偏“系统增强套件里的一个功能分支”。
