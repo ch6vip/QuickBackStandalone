@@ -95,8 +95,7 @@ public final class QuickBackHook extends XposedModule {
                             handleRecentSwipeStop(chain);
                             return null;
                         }
-                    } catch (Throwable e) {
-                        log("onSwipeStop: failed " + e.getClass().getSimpleName());
+                    } catch (Throwable ignored) {
                     }
                     return chain.proceed();
                 });
@@ -108,14 +107,12 @@ public final class QuickBackHook extends XposedModule {
 
     private void installHook(String name, Method method, XposedInterface.Hooker hooker) {
         if (method == null) {
-            log(name + ": skipped, method missing");
             return;
         }
         try {
             hook(method)
                 .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                 .intercept(hooker);
-            log(name + ": installed");
         } catch (Throwable e) {
             log(name + ": failed: " + e.getClass().getSimpleName() + ": " + e.getMessage());
         }
@@ -129,8 +126,7 @@ public final class QuickBackHook extends XposedModule {
             mReadyStateValues[getEnumOrdinal(readyStateClass, "READY_STATE_BACK")] = STATE_BACK;
             mReadyStateValues[getEnumOrdinal(readyStateClass, "READY_STATE_RECENT")] = STATE_RECENT;
             mReadyStateValues[getEnumOrdinal(readyStateClass, "READY_STATE_NONE")] = STATE_NONE;
-        } catch (Throwable e) {
-            log("initReadyStateValues: failed " + e.getClass().getSimpleName());
+        } catch (Throwable ignored) {
         }
     }
 
@@ -210,7 +206,6 @@ public final class QuickBackHook extends XposedModule {
         Object recentsModel = invokeStaticMethod(findClass(CLASS_RECENTS_MODEL), "getInstance", context);
         ActivityManager.RunningTaskInfo runningTask = getRunningTaskForQuickBack(recentsModel);
         if (runningTask == null) {
-            log("findNextTask: runningTask is null");
             return null;
         }
 
@@ -224,12 +219,10 @@ public final class QuickBackHook extends XposedModule {
             Object loadPlan = invokeMethod(recentsModel, "getSmartRecentsTaskLoadPlan", context, runningTaskId);
             Object taskStack = loadPlan != null ? invokeMethod(loadPlan, "getTaskStack") : null;
             if (taskStack == null || (int) invokeMethod(taskStack, "getTaskCount") == 0) {
-                log("findNextTask: taskStack is empty");
                 return null;
             }
             return getNextTaskFromStack(taskStack, runningTask, runningTaskId);
-        } catch (Throwable e) {
-            log("findNextTask: legacy load plan unavailable: " + e.getClass().getSimpleName());
+        } catch (Throwable ignored) {
             return null;
         }
     }
@@ -238,18 +231,12 @@ public final class QuickBackHook extends XposedModule {
                                             int runningTaskId) throws Throwable {
         ArrayList<?> tasks = getTaskList(recentsModel);
         if (tasks == null || tasks.isEmpty()) {
-            log("findNextTaskFromTaskList: task list is empty");
             return null;
         }
 
         int runningTaskIndex = findTaskIndex(tasks, runningTaskId);
         if (runningTaskIndex >= 0 && runningTaskIndex + 1 < tasks.size()) {
             return tasks.get(runningTaskIndex + 1);
-        }
-        if (runningTaskIndex >= 0) {
-            log("findNextTaskFromTaskList: running task has no next task");
-        } else {
-            log("findNextTaskFromTaskList: running task not found");
         }
 
         if (runningTask.baseActivity != null && TARGET_PACKAGE.equals(runningTask.baseActivity.getPackageName())) {
@@ -303,9 +290,6 @@ public final class QuickBackHook extends XposedModule {
             if (runningTaskIndex >= 0 && runningTaskIndex + 1 < stackTasks.size()) {
                 return stackTasks.get(runningTaskIndex + 1);
             }
-            log("getNextTaskFromStack: running task has no next task");
-        } else {
-            log("getNextTaskFromStack: running task not found in stack");
         }
 
         if (runningTask.baseActivity != null && TARGET_PACKAGE.equals(runningTask.baseActivity.getPackageName())) {
@@ -334,7 +318,6 @@ public final class QuickBackHook extends XposedModule {
                 finishSwipeStop(gestureStubView, arrowView, (float) chain.getArg(1));
                 return;
             }
-            log("handleRecentSwipeStop: no task started");
         }
 
         vibrateQuickBackFail(gestureStubView);
@@ -516,12 +499,9 @@ public final class QuickBackHook extends XposedModule {
                 null
             );
             if (result != null && result.containsKey(QuickBackSettingsProvider.EXTRA_ENABLED)) {
-                boolean enabled = result.getBoolean(QuickBackSettingsProvider.EXTRA_ENABLED, false);
-                log("isEnabled: provider=" + enabled);
-                return enabled;
+                return result.getBoolean(QuickBackSettingsProvider.EXTRA_ENABLED, false);
             }
-        } catch (Throwable e) {
-            log("isEnabled: provider read failed: " + e.getClass().getSimpleName());
+        } catch (Throwable ignored) {
         }
         return false;
     }

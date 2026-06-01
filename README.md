@@ -17,6 +17,12 @@
 - 只作用于 `com.miui.home`
 - 一个开关控制是否启用
 
+## 发布状态
+
+- 当前版本：`1.1`
+- 变更摘要：现代 libxposed 迁移、Android 16 适配、调试日志收敛
+- 详细记录见 [`CHANGELOG.md`](./CHANGELOG.md)
+
 ## 使用方式
 
 1. 安装生成的 APK
@@ -62,10 +68,7 @@
 
 正常情况下，日志里会看到这些关键信息：
 
-- `hookOnSwipeStart: installed`
-- `hookOnSwipeStop: installed`
-- `modern quick back gesture: ...`
+- `handleLoadPackage: hooks installed`
 - `handleRecentSwipeStop: task started`
-- `isEnabled: provider=true`
 
-如果开关关闭，日志会显示 `isEnabled: provider=false`，并且不会执行任务切换。
+如果开关关闭，不会输出每次读取开关的调试日志，也不会执行任务切换。正式版只保留 Hook 安装、Hook 失败、任务切换成功和失败反馈相关日志。
