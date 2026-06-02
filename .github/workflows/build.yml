@@ -24,11 +24,9 @@ jobs:
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: 8.10.2
 
       - name: Build debug APK
-        run: gradle assembleDebug --no-daemon --console=plain
+        run: ./gradlew assembleDebug --no-daemon --console=plain
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
