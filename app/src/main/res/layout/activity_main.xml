@@ -35,4 +35,39 @@
         android:layout_marginTop="20dp"
         android:text="@string/enable_label" />
 
+    <TextView
+        android:id="@+id/sensitivity_title"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="24dp"
+        android:text="@string/sensitivity_title"
+        android:textSize="15sp"
+        android:textStyle="bold" />
+
+    <RadioGroup
+        android:id="@+id/sensitivity_group"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:orientation="vertical">
+
+        <RadioButton
+            android:id="@+id/sensitivity_conservative"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/sensitivity_conservative" />
+
+        <RadioButton
+            android:id="@+id/sensitivity_standard"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/sensitivity_standard" />
+
+        <RadioButton
+            android:id="@+id/sensitivity_sensitive"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/sensitivity_sensitive" />
+    </RadioGroup>
+
 </LinearLayout>

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- 设置页新增保守、标准、灵敏三档触发灵敏度；Hook 侧通过 Provider 同步读取档位。
+- 现代 QuickBack 兜底触发阈值改为可配置：保守 `850ms + 340f`，标准 `700ms + 300f`，灵敏 `600ms + 280f`。
+- 任务启动动画资源缺失时退回 `ActivityOptions.makeBasic()`，降低桌面资源名差异导致启动失败的概率。
+- QuickBack 失败震动收紧为“找到目标但启动失败”才触发；没有下一个任务或系统不支持 next task 时只做手势收尾。
 - 收紧现代 QuickBack 兜底触发条件，从 `350ms + 180f` 调整为 `700ms-1800ms + 300f`，降低和系统普通返回手势混淆的概率。
 - 修复设置页未启用 QuickBack 时仍可能吞掉系统返回手势的问题；开关关闭时会完整放行桌面原始返回逻辑。
 - `isDisableQuickSwitch()` 只在 QuickBack 开关启用时强制放开，关闭时走桌面原实现。

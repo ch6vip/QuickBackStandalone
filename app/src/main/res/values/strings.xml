@@ -3,4 +3,8 @@
     <string name="module_desc">独立的“切换上一个应用” LSPosed 模块</string>
     <string name="enable_label">启用 QuickBack</string>
     <string name="hint_text">提示：需要在 LSPosed 中勾选 com.miui.home。首次启用或更新模块后，重启桌面或设备后生效。</string>
+    <string name="sensitivity_title">触发灵敏度</string>
+    <string name="sensitivity_conservative">保守：更难误触</string>
+    <string name="sensitivity_standard">标准：推荐</string>
+    <string name="sensitivity_sensitive">灵敏：更快触发</string>
 </resources>

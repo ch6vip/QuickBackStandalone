@@ -7,6 +7,7 @@ import android.os.Bundle;
 import android.os.SystemClock;
 import android.util.Log;
 
+import com.sevtinge.quickback.Prefs;
 import com.sevtinge.quickback.QuickBackSettingsProvider;
 
 import java.lang.reflect.Field;
@@ -31,9 +32,13 @@ public final class QuickBackHook extends XposedModule {
     private static final String CLASS_RECENTS_MODEL = "com.miui.home.recents.RecentsModel";
     private static final String CLASS_ACTIVITY_MANAGER_WRAPPER = "com.android.systemui.shared.recents.system.ActivityManagerWrapper";
     private static final String CLASS_BACK_GESTURE_UTILS = "com.android.systemui.fsgesture.BackGestureUtils";
-    private static final long MODERN_QUICK_BACK_HOLD_MS = 700L;
+    private static final long MODERN_QUICK_BACK_CONSERVATIVE_HOLD_MS = 850L;
+    private static final long MODERN_QUICK_BACK_STANDARD_HOLD_MS = 700L;
+    private static final long MODERN_QUICK_BACK_SENSITIVE_HOLD_MS = 600L;
     private static final long MODERN_QUICK_BACK_MAX_HOLD_MS = 1800L;
-    private static final float MODERN_QUICK_BACK_MIN_OFFSET = 300.0f;
+    private static final float MODERN_QUICK_BACK_CONSERVATIVE_MIN_OFFSET = 340.0f;
+    private static final float MODERN_QUICK_BACK_STANDARD_MIN_OFFSET = 300.0f;
+    private static final float MODERN_QUICK_BACK_SENSITIVE_MIN_OFFSET = 280.0f;
     private static final long SETTINGS_CACHE_TTL_MS = 1000L;
     private static final long DEBUG_LOG_INTERVAL_MS = 5000L;
     private static final long QUICK_BACK_FAIL_VIBRATE_MS = 100L;
@@ -58,8 +63,8 @@ public final class QuickBackHook extends XposedModule {
     private Method mStartTaskFromRecentsByIdMethod;
     private Method mStartTaskFromRecentsByKeyMethod;
     private long mSettingsCacheTime;
-    private boolean mSettingsCacheEnabled;
-    private long mLastDebugLogTime;
+    private QuickBackSettings mSettingsCache = QuickBackSettings.DISABLED;
+    private final Map<String, Long> mLastDebugLogTimes = new ConcurrentHashMap<>();
 
     @Override
     public void onPackageReady(PackageReadyParam param) {
@@ -73,12 +78,12 @@ public final class QuickBackHook extends XposedModule {
             installHook("hookDisableQuickSwitch", findDeclaredMethod(CLASS_GESTURE_STUB_VIEW, "isDisableQuickSwitch"),
                 chain -> {
                     Context context = (Context) invokeMethod(chain.getThisObject(), "getContext");
-                    return isEnabled(context) ? false : chain.proceed();
+                    return getSettings(context).enabled ? false : chain.proceed();
                 });
             installHook("hookLoadRecentTaskIcon", findDeclaredMethod(CLASS_GESTURE_BACK_ARROW_VIEW, "loadRecentTaskIcon"),
                 chain -> {
                     Context context = (Context) invokeMethod(chain.getThisObject(), "getContext");
-                    if (!isEnabled(context)) {
+                    if (!getSettings(context).enabled) {
                         return chain.proceed();
                     }
 
@@ -97,25 +102,29 @@ public final class QuickBackHook extends XposedModule {
                 });
             installHook("hookOnSwipeStart", findDeclaredMethod(CLASS_GESTURE_STUB_CALLBACK, "onSwipeStart", float.class),
                 chain -> {
-                    synchronized (mSwipeStartTimes) {
-                        mSwipeStartTimes.put(chain.getThisObject(), SystemClock.uptimeMillis());
+                    if (mReadyStateValues == null) {
+                        synchronized (mSwipeStartTimes) {
+                            mSwipeStartTimes.put(chain.getThisObject(), SystemClock.uptimeMillis());
+                        }
                     }
                     return chain.proceed();
                 });
             installHook("hookOnSwipeStop", findDeclaredMethod(CLASS_GESTURE_STUB_CALLBACK, "onSwipeStop", boolean.class, float.class, boolean.class),
                 chain -> {
                     boolean isFinish = (boolean) chain.getArg(0);
+                    Long swipeStartTime = consumeSwipeStartTime(chain.getThisObject());
                     if (!isFinish) {
                         return chain.proceed();
                     }
 
                     try {
                         Context context = getContextFromSwipeCallback(chain.getThisObject());
-                        if (!isEnabled(context)) {
+                        QuickBackSettings settings = getSettings(context);
+                        if (!settings.enabled) {
                             return chain.proceed();
                         }
-                        if (isLegacyRecentState(chain.getThisObject()) || isModernQuickBackGesture(chain)) {
-                            handleRecentSwipeStop(chain);
+                        if (isLegacyRecentState(chain.getThisObject()) || isModernQuickBackGesture(chain, swipeStartTime, settings)) {
+                            handleRecentSwipeStop(chain, settings);
                             return null;
                         }
                     } catch (Throwable e) {
@@ -171,14 +180,16 @@ public final class QuickBackHook extends XposedModule {
         return (Context) getFieldValue(gestureStubView, "mContext");
     }
 
-    private boolean isModernQuickBackGesture(XposedInterface.Chain chain) throws Throwable {
+    private Long consumeSwipeStartTime(Object swipeCallback) {
+        synchronized (mSwipeStartTimes) {
+            return mSwipeStartTimes.remove(swipeCallback);
+        }
+    }
+
+    private boolean isModernQuickBackGesture(XposedInterface.Chain chain, Long startTime,
+                                             QuickBackSettings settings) throws Throwable {
         if (mReadyStateValues != null) {
             return false;
-        }
-
-        Long startTime;
-        synchronized (mSwipeStartTimes) {
-            startTime = mSwipeStartTimes.remove(chain.getThisObject());
         }
         if (startTime == null) {
             return false;
@@ -186,9 +197,9 @@ public final class QuickBackHook extends XposedModule {
 
         long duration = SystemClock.uptimeMillis() - startTime;
         float offset = (float) chain.getArg(1);
-        return duration >= MODERN_QUICK_BACK_HOLD_MS
+        return duration >= settings.holdMs
             && duration <= MODERN_QUICK_BACK_MAX_HOLD_MS
-            && offset >= MODERN_QUICK_BACK_MIN_OFFSET;
+            && offset >= settings.minOffset;
     }
 
     private int getCurrentStateOrdinal(Object swipeCallback) throws Throwable {
@@ -325,28 +336,37 @@ public final class QuickBackHook extends XposedModule {
         return null;
     }
 
-    private void handleRecentSwipeStop(XposedInterface.Chain chain) throws Throwable {
+    private void handleRecentSwipeStop(XposedInterface.Chain chain, QuickBackSettings settings) throws Throwable {
         Object swipeCallback = chain.getThisObject();
         Object gestureStubView = getFieldValue(swipeCallback, "this$0");
         Object arrowView = getFieldValue(gestureStubView, "mGestureBackArrowView");
         Context context = (Context) getFieldValue(gestureStubView, "mContext");
-        if (!isEnabled(context)) {
+        if (!settings.enabled) {
             return;
         }
         int gestureStubPos = (int) getFieldValue(gestureStubView, "mGestureStubPos");
 
         invokeMethod(gestureStubView, "onBackCancelled");
 
+        boolean shouldVibrateOnFail = false;
         if (isNextTaskSupported(gestureStubView)) {
             Object task = findNextTask(context);
-            if (task != null && startTaskFromRecents(context, task, gestureStubPos)) {
+            if (task == null) {
+                logDebugLimited("handleRecentSwipeStop: no next task");
+            } else if (startTaskFromRecents(context, task, gestureStubPos)) {
                 log("handleRecentSwipeStop: task started");
                 finishSwipeStop(gestureStubView, arrowView, (float) chain.getArg(1));
                 return;
+            } else {
+                shouldVibrateOnFail = true;
             }
+        } else {
+            logDebugLimited("handleRecentSwipeStop: next task unsupported");
         }
 
-        vibrateQuickBackFail(gestureStubView);
+        if (shouldVibrateOnFail) {
+            vibrateQuickBackFail(gestureStubView);
+        }
         finishSwipeStop(gestureStubView, arrowView, (float) chain.getArg(1));
     }
 
@@ -373,6 +393,7 @@ public final class QuickBackHook extends XposedModule {
         int taskId = (int) getFieldValue(taskKey, "id");
         Object wrapper = invokeStaticMethod(findClass(CLASS_ACTIVITY_MANAGER_WRAPPER), "getInstance");
         if (wrapper == null) {
+            logDebugLimited("startTaskFromRecents: ActivityManagerWrapper is null");
             return false;
         }
 
@@ -383,32 +404,38 @@ public final class QuickBackHook extends XposedModule {
                 mStartTaskFromRecentsByIdMethod.setAccessible(true);
             }
             Object started = mStartTaskFromRecentsByIdMethod.invoke(wrapper, taskId, options);
-            return !(started instanceof Boolean) || (Boolean) started;
-        } catch (Throwable ignored) {
-            try {
-                if (mStartTaskFromRecentsByKeyMethod == null) {
-                    mStartTaskFromRecentsByKeyMethod = wrapper.getClass().getMethod(
-                        "startActivityFromRecents", taskKey.getClass(), ActivityOptions.class);
-                    mStartTaskFromRecentsByKeyMethod.setAccessible(true);
-                }
-                mStartTaskFromRecentsByKeyMethod.invoke(wrapper, taskKey, options);
+            if (!(started instanceof Boolean) || (Boolean) started) {
                 return true;
-            } catch (Throwable ignoredAgain) {
-                return false;
             }
+            logDebugLimited("startTaskFromRecents: taskId launch returned false, taskId=" + taskId);
+        } catch (Throwable e) {
+            logDebugLimited("startTaskFromRecents: taskId launch failed: " + simpleError(e));
+        }
+
+        try {
+            if (mStartTaskFromRecentsByKeyMethod == null) {
+                mStartTaskFromRecentsByKeyMethod = wrapper.getClass().getMethod(
+                    "startActivityFromRecents", taskKey.getClass(), ActivityOptions.class);
+                mStartTaskFromRecentsByKeyMethod.setAccessible(true);
+            }
+            mStartTaskFromRecentsByKeyMethod.invoke(wrapper, taskKey, options);
+            return true;
+        } catch (Throwable keyError) {
+            logDebugLimited("startTaskFromRecents: taskKey launch failed: " + simpleError(keyError));
+            return false;
         }
     }
 
     private ActivityOptions createActivityOptions(Context context, Object task, int gestureStubPos) throws Throwable {
         ActivityOptions options = null;
         if (gestureStubPos == GESTURE_POS_LEFT) {
-            options = ActivityOptions.makeCustomAnimation(context,
-                getAnimResId(context, "recents_quick_switch_left_enter"),
-                getAnimResId(context, "recents_quick_switch_left_exit"));
+            options = createCustomActivityOptions(context,
+                "recents_quick_switch_left_enter",
+                "recents_quick_switch_left_exit");
         } else if (gestureStubPos == GESTURE_POS_RIGHT) {
-            options = ActivityOptions.makeCustomAnimation(context,
-                getAnimResId(context, "recents_quick_switch_right_enter"),
-                getAnimResId(context, "recents_quick_switch_right_exit"));
+            options = createCustomActivityOptions(context,
+                "recents_quick_switch_right_enter",
+                "recents_quick_switch_right_exit");
         }
 
         int windowingMode = (int) getFieldValue(getFieldValue(task, "key"), "windowingMode");
@@ -420,6 +447,18 @@ public final class QuickBackHook extends XposedModule {
         }
 
         return options;
+    }
+
+    private ActivityOptions createCustomActivityOptions(Context context, String enterAnimName, String exitAnimName) {
+        int enterAnim = getAnimResId(context, enterAnimName);
+        int exitAnim = getAnimResId(context, exitAnimName);
+        if (enterAnim != 0 && exitAnim != 0) {
+            return ActivityOptions.makeCustomAnimation(context, enterAnim, exitAnim);
+        }
+
+        logDebugLimited("createActivityOptions: missing animation resources: "
+            + enterAnimName + "=" + enterAnim + ", " + exitAnimName + "=" + exitAnim);
+        return ActivityOptions.makeBasic();
     }
 
     private int getAnimResId(Context context, String animName) {
@@ -454,7 +493,7 @@ public final class QuickBackHook extends XposedModule {
 
     private boolean isNextTaskSupported(Object gestureStubView) throws Throwable {
         Context context = (Context) getFieldValue(gestureStubView, "mContext");
-        if (!isEnabled(context)) {
+        if (!getSettings(context).enabled) {
             return false;
         }
         Object contentResolver = getFieldValue(gestureStubView, "mContentResolver");
@@ -467,7 +506,7 @@ public final class QuickBackHook extends XposedModule {
 
     private boolean isNextTaskSupportedFromArrowView(Object arrowView) throws Throwable {
         Context context = (Context) invokeMethod(arrowView, "getContext");
-        if (!isEnabled(context)) {
+        if (!getSettings(context).enabled) {
             return false;
         }
         Object contentResolver = getFieldValue(arrowView, "mContentResolver");
@@ -513,14 +552,14 @@ public final class QuickBackHook extends XposedModule {
         return invokeMethod(backGestureUtils, "convertOffset", offset);
     }
 
-    private boolean isEnabled(Context context) {
+    private QuickBackSettings getSettings(Context context) {
         if (context == null) {
-            return false;
+            return QuickBackSettings.DISABLED;
         }
 
         long now = SystemClock.uptimeMillis();
         if (now - mSettingsCacheTime < SETTINGS_CACHE_TTL_MS) {
-            return mSettingsCacheEnabled;
+            return mSettingsCache;
         }
 
         try {
@@ -531,16 +570,18 @@ public final class QuickBackHook extends XposedModule {
                 null
             );
             if (result != null && result.containsKey(QuickBackSettingsProvider.EXTRA_ENABLED)) {
-                mSettingsCacheEnabled = result.getBoolean(QuickBackSettingsProvider.EXTRA_ENABLED, false);
+                mSettingsCache = QuickBackSettings.from(
+                    result.getBoolean(QuickBackSettingsProvider.EXTRA_ENABLED, false),
+                    result.getInt(QuickBackSettingsProvider.EXTRA_SENSITIVITY, Prefs.SENSITIVITY_STANDARD));
                 mSettingsCacheTime = now;
-                return mSettingsCacheEnabled;
+                return mSettingsCache;
             }
         } catch (Throwable e) {
-            logDebugLimited("isEnabled: provider read failed: " + simpleError(e));
+            logDebugLimited("getSettings: provider read failed: " + simpleError(e));
         }
-        mSettingsCacheEnabled = false;
+        mSettingsCache = QuickBackSettings.DISABLED;
         mSettingsCacheTime = now;
-        return false;
+        return mSettingsCache;
     }
 
     private Class<?> findClass(String name) throws ClassNotFoundException {
@@ -705,10 +746,11 @@ public final class QuickBackHook extends XposedModule {
 
     private void logDebugLimited(String message) {
         long now = SystemClock.uptimeMillis();
-        if (now - mLastDebugLogTime < DEBUG_LOG_INTERVAL_MS) {
+        Long lastLogTime = mLastDebugLogTimes.get(message);
+        if (lastLogTime != null && now - lastLogTime < DEBUG_LOG_INTERVAL_MS) {
             return;
         }
-        mLastDebugLogTime = now;
+        mLastDebugLogTimes.put(message, now);
         log(message);
     }
 
@@ -718,6 +760,46 @@ public final class QuickBackHook extends XposedModule {
             return e.getClass().getSimpleName();
         }
         return e.getClass().getSimpleName() + ": " + message;
+    }
+
+    private static final class QuickBackSettings {
+
+        private static final QuickBackSettings DISABLED = new QuickBackSettings(
+            false,
+            MODERN_QUICK_BACK_STANDARD_HOLD_MS,
+            MODERN_QUICK_BACK_STANDARD_MIN_OFFSET);
+
+        final boolean enabled;
+        final long holdMs;
+        final float minOffset;
+
+        private QuickBackSettings(boolean enabled, long holdMs, float minOffset) {
+            this.enabled = enabled;
+            this.holdMs = holdMs;
+            this.minOffset = minOffset;
+        }
+
+        static QuickBackSettings from(boolean enabled, int sensitivity) {
+            if (!enabled) {
+                return DISABLED;
+            }
+            if (sensitivity == Prefs.SENSITIVITY_CONSERVATIVE) {
+                return new QuickBackSettings(
+                    true,
+                    MODERN_QUICK_BACK_CONSERVATIVE_HOLD_MS,
+                    MODERN_QUICK_BACK_CONSERVATIVE_MIN_OFFSET);
+            }
+            if (sensitivity == Prefs.SENSITIVITY_SENSITIVE) {
+                return new QuickBackSettings(
+                    true,
+                    MODERN_QUICK_BACK_SENSITIVE_HOLD_MS,
+                    MODERN_QUICK_BACK_SENSITIVE_MIN_OFFSET);
+            }
+            return new QuickBackSettings(
+                true,
+                MODERN_QUICK_BACK_STANDARD_HOLD_MS,
+                MODERN_QUICK_BACK_STANDARD_MIN_OFFSET);
+        }
     }
 
 }

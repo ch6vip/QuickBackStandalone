@@ -17,6 +17,7 @@ public final class QuickBackSettingsProvider extends ContentProvider {
     public static final Uri URI = Uri.parse("content://" + AUTHORITY);
     public static final String METHOD_GET_ENABLED = "get_enabled";
     public static final String EXTRA_ENABLED = "enabled";
+    public static final String EXTRA_SENSITIVITY = "sensitivity";
     private static final String TARGET_PACKAGE = "com.miui.home";
 
     @Override
@@ -33,6 +34,8 @@ public final class QuickBackSettingsProvider extends ContentProvider {
             }
             SharedPreferences prefs = requireProviderContext().getSharedPreferences(Prefs.FILE_NAME, Context.MODE_PRIVATE);
             result.putBoolean(EXTRA_ENABLED, prefs.getBoolean(Prefs.KEY_ENABLED, false));
+            result.putInt(EXTRA_SENSITIVITY,
+                prefs.getInt(Prefs.KEY_SENSITIVITY, Prefs.SENSITIVITY_STANDARD));
             return result;
         }
         return result;
